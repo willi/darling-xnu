@@ -38,6 +38,35 @@ struct _pthread_registration_data {
 
 static struct _pthread_registration_data g_pth_regdata;
 
+// What bsdthread_register() tells libpthread (and through it, libdispatch) the kernel supports. The syscalls
+// behind every bit are always there, as a kernel's would be; the mask only decides which code paths the process's
+// own libraries take, so it depends on which libraries those are.
+static int workq_supported_features(void)
+{
+	// Darling's libpthread and libdispatch are built for none of these. Its libdispatch has
+	// DISPATCH_USE_KEVENT_WORKQUEUE and DISPATCH_USE_KEVENT_WORKLOOP off and runs without kernel QoS.
+	if (!__libkernel_has_apple_libsystem())
+		return 0;
+
+	// Apple's libSystem (an iOS Simulator runtime) requires them all:
+	return
+		// workqueue threads start in libpthread's _pthread_wqthread with new-SPI flags (workq_kernreturn.c)
+		PTHREAD_FEATURE_DISPATCHFUNC
+		// thread requests carry a pthread_priority_t, which is what workq_thread_flags() takes
+		| WORKQ_FEATURE_FINEPRIO
+		// libpthread sets thread QoS through bsdthread_ctl() instead of in userspace only
+		| PTHREAD_FEATURE_BSDTHREADCTL
+		// libpthread uses bsdthread_ctl(BSDTHREAD_CTL_SET_SELF) for QoS and vouchers
+		| PTHREAD_FEATURE_SETSELF
+		// QoS classes include MAINTENANCE, and the kernel has a default QoS
+		| PTHREAD_FEATURE_QOS_MAINTENANCE
+		| PTHREAD_FEATURE_QOS_DEFAULT
+		// kevent_qos(KEVENT_FLAG_WORKQ) and its event manager thread (kqueue/kevent_workq.c)
+		| WORKQ_FEATURE_KEVENT
+		// kevent_id() and EVFILT_WORKLOOP (kqueue/kevent_id.c)
+		| WORKQ_FEATURE_WORKLOOP;
+}
+
 long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		const struct _pthread_registration_data* pth_regdata,
 		unsigned long pth_regdata_len, unsigned long long dpq_offset)
@@ -53,16 +82,7 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		__simple_abort();
 	}
 
-	// Darling's libdispatch runs without kernel QoS, kevent workqueues or workloops. Apple's libdispatch (an iOS
-	// Simulator runtime) requires all three; the kevent workqueue is emulated in workq_kernreturn.c and workloops
-	// in kevent_id.c.
-	if (__libkernel_has_apple_libsystem())
-		return PTHREAD_FEATURE_DISPATCHFUNC | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_BSDTHREADCTL
-			| PTHREAD_FEATURE_SETSELF | PTHREAD_FEATURE_QOS_MAINTENANCE | WORKQ_FEATURE_KEVENT
-			| WORKQ_FEATURE_WORKLOOP | PTHREAD_FEATURE_QOS_DEFAULT;
-
-	return /* WORKQ_FEATURE_KEVENT | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_QOS_MAINTENANCE 
-		| PTHREAD_FEATURE_DISPATCHFUNC | PTHREAD_FEATURE_QOS_DEFAULT */ 0;
+	return workq_supported_features();
 }
 
 // Before you make any changes to the assembly code, I strongly recommend looking at the `_thread_start`
