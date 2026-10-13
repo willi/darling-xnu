@@ -58,4 +58,33 @@ struct xnu__posix_spawn_file_actions
 };
 typedef struct xnu__posix_spawn_file_actions* xnu_posix_spawn_file_actions_t;
 
+// See [xnu]/bsd/sys/spawn_internal.h
+typedef enum {
+	XNU_PSPA_SPECIAL = 0,
+	XNU_PSPA_EXCEPTION = 1,
+	XNU_PSPA_AU_SESSION = 2,
+	XNU_PSPA_IMP_WATCHPORTS = 3,
+	XNU_PSPA_REGISTERED_PORTS = 4,
+	XNU_PSPA_PTRAUTH_TASK_PORT = 5,
+	XNU_PSPA_SUID_CRED = 6,
+} xnu_pspa_t;
+
+struct xnu__ps_port_action
+{
+	xnu_pspa_t port_type;
+	unsigned int mask;
+	mach_port_name_t new_port;
+	int behavior;
+	int flavor;
+	int which;
+};
+
+struct xnu__posix_spawn_port_actions
+{
+	int pspa_alloc;
+	int pspa_count;
+	struct xnu__ps_port_action pspa_actions[];
+};
+typedef struct xnu__posix_spawn_port_actions* xnu_posix_spawn_port_actions_t;
+
 #endif // DARLING_CONVERSION_PROCESS_POSIX_SPAWN

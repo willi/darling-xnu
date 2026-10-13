@@ -3,8 +3,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/spawn.h>
+#include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <_libkernel_init.h>
+#include <mach/mach_port.h>
+#include <mach/task.h>
+#include <libsimple/lock.h>
 
 #include <darling/emulation/xnu_syscall/bsd/impl/process/execve.h>
 #include <darling/emulation/common/base.h>
@@ -44,18 +48,109 @@
 
 extern int _mach_fork_child(void);
 
+// XNU sets the special ports a spawn's port actions ask for on the new task, naming the ports in the caller's space.
+// Darling can't reach into the new task like that, but a task created by fork or exec takes its inheritable special
+// ports (the bootstrap port among them) from the task it comes from. So the caller sets them on itself around the
+// fork or exec, and puts its own back once the child has them. The lock keeps two spawns from mixing their ports up.
+// Other port action types are ignored, as before (the simulator doesn't support exception ports, for one).
+
+struct spawn_special_port
+{
+	int which;
+	mach_port_t saved;
+};
+
+static libsimple_lock_t spawn_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
+
+static int spawn_count_special_ports(const struct _posix_spawn_args_desc* desc)
+{
+	const struct xnu__posix_spawn_port_actions* pact = desc ? desc->pactp : NULL;
+	int i, n = 0;
+
+	if (pact == NULL || desc->port_actions_size < sizeof(*pact)
+			|| pact->pspa_count < 0
+			|| desc->port_actions_size < sizeof(*pact) + pact->pspa_count * sizeof(pact->pspa_actions[0]))
+		return 0;
+
+	for (i = 0; i < pact->pspa_count; i++)
+	{
+		if (pact->pspa_actions[i].port_type == XNU_PSPA_SPECIAL)
+			n++;
+	}
+	return n;
+}
+
+static void spawn_restore_special_ports(struct spawn_special_port* ports, int n);
+
+// Takes spawn_ports_lock, which spawn_restore_special_ports() releases (also when this fails).
+static int spawn_set_special_ports(const struct _posix_spawn_args_desc* desc, struct spawn_special_port* ports, int n)
+{
+	const struct xnu__posix_spawn_port_actions* pact = desc->pactp;
+	int i, set = 0;
+	kern_return_t kr = KERN_SUCCESS;
+
+	libsimple_lock_lock(&spawn_ports_lock);
+
+	for (i = 0; i < pact->pspa_count && set < n; i++)
+	{
+		const struct xnu__ps_port_action* act = &pact->pspa_actions[i];
+		mach_port_t saved;
+
+		if (act->port_type != XNU_PSPA_SPECIAL)
+			continue;
+
+		kr = task_get_special_port(mach_task_self(), act->which, &saved);
+		if (kr != KERN_SUCCESS)
+			break;
+		kr = task_set_special_port(mach_task_self(), act->which, act->new_port);
+		if (kr != KERN_SUCCESS)
+		{
+			if (saved != MACH_PORT_NULL)
+				mach_port_deallocate(mach_task_self(), saved);
+			break;
+		}
+		ports[set++] = (struct spawn_special_port) { .which = act->which, .saved = saved };
+	}
+
+	if (kr == KERN_SUCCESS)
+		return 0;
+
+	spawn_restore_special_ports(ports, set);
+	return (kr == KERN_INVALID_ARGUMENT) ? -EINVAL : -EPERM;
+}
+
+static void spawn_restore_special_ports(struct spawn_special_port* ports, int n)
+{
+	while (n-- > 0)
+	{
+		task_set_special_port(mach_task_self(), ports[n].which, ports[n].saved);
+		if (ports[n].saved != MACH_PORT_NULL)
+			mach_port_deallocate(mach_task_self(), ports[n].saved);
+	}
+	libsimple_lock_unlock(&spawn_ports_lock);
+}
+
 long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_desc* desc,
 		char** argvp, char** envp)
 {
 	int ret, my_pid;
 	int pipe[2] = { -1, -1 };
+	int nports = spawn_count_special_ports(desc);
+	struct spawn_special_port* ports = __builtin_alloca(nports * sizeof(*ports));
+
+	if (nports > 0)
+	{
+		ret = spawn_set_special_ports(desc, ports, nports);
+		if (ret < 0)
+			return ret;
+	}
 
 	if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
 		goto no_fork;
 
 	ret = LINUX_SYSCALL(__NR_pipe2, pipe, LINUX_O_CLOEXEC);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	// we don't want to call user atfork callbacks, but we *do* want to call most
 	// libsystem atfork callbacks to set up the environment for some of the calls we need
@@ -74,6 +169,10 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 			_libkernel_darling_functions->posix_spawn_child();
 		else
 			_mach_fork_child(); // what Apple's libSystem runs after fork(); sys_fork did the rest of the handshake
+
+		// the child has its special ports; the lock came along locked
+		if (nports > 0)
+			libsimple_lock_unlock(&spawn_ports_lock);
 
 no_fork:
 		if (desc && desc->attrp)
@@ -339,6 +438,8 @@ fail:
 		if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
 		{
 			// no_fork case
+			if (nports > 0)
+				spawn_restore_special_ports(ports, nports);
 			ret = errno_linux_to_bsd(ret);
 			return ret;
 		}
@@ -360,6 +461,12 @@ fail:
 		if (_libkernel_darling_functions)
 			_libkernel_darling_functions->posix_spawn_parent();
 
+		if (nports > 0)
+		{
+			spawn_restore_special_ports(ports, nports);
+			nports = 0;
+		}
+
 		if (my_pid < 0)
 		{
 			ret = my_pid;
@@ -375,5 +482,7 @@ fail:
 	}
 
 out:
+	if (nports > 0)
+		spawn_restore_special_ports(ports, nports);
 	return ret;
 }
