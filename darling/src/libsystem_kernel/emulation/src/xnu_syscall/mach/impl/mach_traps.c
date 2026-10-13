@@ -2,6 +2,8 @@
 #include <mach/mach_traps.h>
 #include <mach/vm_statistics.h>
 #include <mach/kern_return.h>
+#include <mach/mig_errors.h>
+#include <stdbool.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -772,12 +774,19 @@ kern_return_t mach_generate_activity_id_impl(mach_port_name_t task, int i, uint6
 	return code;
 }
 
+// darlingserver's own failures are small negative errnos; MIG errors (MIG_TYPE_ERROR and below, such as
+// MIG_ARRAY_TOO_LARGE for an oversized recipe array) are the trap's result.
+static bool voucher_rpc_failed_internally(int code)
+{
+	return code < 0 && code > MIG_TYPE_ERROR;
+}
+
 kern_return_t host_create_mach_voucher_impl(mach_port_name_t host, mach_voucher_attr_raw_recipe_array_t recipes,
 				int recipes_size, mach_port_name_t* voucher)
 {
 	int code = dserver_rpc_host_create_mach_voucher(host, recipes, recipes_size, voucher);
 
-	if (code < 0) {
+	if (voucher_rpc_failed_internally(code)) {
 		__simple_printf("host_create_mach_voucher failed (internally): %d\n", code);
 		__simple_abort();
 	}
@@ -790,7 +799,7 @@ kern_return_t mach_voucher_extract_attr_recipe_impl(mach_port_name_t voucher_nam
 {
 	int code = dserver_rpc_mach_voucher_extract_attr_recipe(voucher_name, key, recipe, recipe_size);
 
-	if (code < 0) {
+	if (voucher_rpc_failed_internally(code)) {
 		__simple_printf("mach_voucher_extract_attr_recipe failed (internally): %d\n", code);
 		__simple_abort();
 	}
