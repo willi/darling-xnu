@@ -1,6 +1,9 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
 
 #include <sys/errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <sys/fcntl.h>
 #include <stddef.h>
 #include <sys/queue.h>
 #include <libsimple/lock.h>
@@ -20,6 +23,11 @@
 #include <darling/emulation/xnu_syscall/mach/impl/mach_traps.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
+#include <darling/emulation/linux_premigration/signal/sigexc.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent64.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_qos.h>
 
 #include <elfcalls/threads.h>
 #include <darlingserver/rpc.h>
@@ -60,6 +68,9 @@
 
 #define WORKQ_EXIT_THREAD_NKEVENT (-1)
 
+// what XNU hands a kevent workqueue thread at most at once
+#define WQ_KEVENT_LIST_LEN 16
+
 static int workq_sem = WQ_MAX_THREADS; // max 64 threads in use
 static libsimple_lock_t workq_parked_lock = LIBSIMPLE_LOCK_INITIALIZER;
 // static int workq_parked_threads = 0; // num spawned, but unused threads
@@ -71,26 +82,16 @@ TAILQ_HEAD(tailhead, parked_thread) workq_parked_head = TAILQ_HEAD_INITIALIZER(w
 struct parked_thread
 {
 	int sem, flags;
-	struct wq_kevent_data* event;
 	TAILQ_ENTRY(parked_thread) entries;
 };
 
 static void list_add(struct parked_thread* head, struct parked_thread* item);
 static void list_remove(struct parked_thread* head, struct parked_thread* item);
 
-struct timespec
-{
-	long tv_sec;
-	long tv_nsec;
-};
-
 //void* __attribute__((weak)) __attribute__((visibility("default"))) pthread_getspecific(unsigned long key) { return NULL; }
 //int __attribute__((weak)) __attribute__((visibility("default"))) pthread_setspecific(unsigned long key, const void* value) { return 1; }
 
 static int priority_to_class(int prio);
-
-// This is horrible, but it may work
-static struct wq_kevent_data* wq_event_pending = NULL;
 
 static void rpc_guard(int fd) {
 	guard_entry_options_t options;
@@ -122,37 +123,191 @@ static int extract_wq_flags(int priority) {
 	return flags;
 };
 
+#ifndef VARIANT_DYLD
+// XNU's kevent workqueue (WORKQ_FEATURE_KEVENT), which Apple's libdispatch requires: knotes registered with
+// kevent_qos(KEVENT_FLAG_WORKQ) live on a kqueue of their own, and the events they fire are handed to
+// workqueue threads instead of being returned to whoever registered them. Here, a single event manager thread
+// waits on that kqueue, passes each batch to libdispatch's kevent callback and applies the changes the callback
+// returns before it waits again, so no event is delivered twice while libdispatch handles it.
+static libsimple_lock_t workq_kevent_lock = LIBSIMPLE_LOCK_INITIALIZER;
+static int workq_kevent_kq = -1;
+static bool workq_kevent_manager_started = false;
+static struct kevent_qos_s workq_kevent_events[WQ_KEVENT_LIST_LEN];
+
+static int workq_kevent_get_kq(void)
+{
+	libsimple_lock_lock(&workq_kevent_lock);
+	if (workq_kevent_kq < 0)
+	{
+		workq_kevent_kq = sys_kqueue();
+		if (workq_kevent_kq >= 0)
+			sys_fcntl(workq_kevent_kq, F_SETFD, FD_CLOEXEC);
+	}
+	libsimple_lock_unlock(&workq_kevent_lock);
+	return workq_kevent_kq;
+}
+
+// Applies `changelist` to the kevent workqueue. Like XNU, only failed changes (and those with EV_RECEIPT) are
+// reported in `eventlist`; if it has no room, the first failure fails the call.
+static int workq_kevent_apply(const struct kevent_qos_s* changelist, int nchanges,
+		struct kevent_qos_s* eventlist, int nevents)
+{
+	struct kevent64_s* changelist64 = NULL;
+	struct kevent64_s* eventlist64 = NULL;
+	int kq, rv, i;
+
+	kq = workq_kevent_get_kq();
+	if (kq < 0)
+		return kq;
+
+	if (nchanges > 0)
+	{
+		changelist64 = (struct kevent64_s*) __builtin_alloca(nchanges * sizeof(struct kevent64_s));
+		for (i = 0; i < nchanges; i++)
+			kevent_qos_to_64(&changelist[i], &changelist64[i]);
+	}
+	if (nevents > 0)
+		eventlist64 = (struct kevent64_s*) __builtin_alloca(nevents * sizeof(struct kevent64_s));
+
+	rv = sys_kevent64(kq, changelist64, nchanges, eventlist64, nevents, KEVENT_FLAG_ERROR_EVENTS, NULL);
+
+	for (i = 0; i < rv; i++)
+		kevent_64_to_qos(&eventlist64[i], &eventlist[i]);
+	return rv;
+}
+
+// Restarts the event manager thread in `_pthread_wqthread` with `events`. Unlike the reuse of other workqueue
+// threads, this starts over at the top of the thread's stack: the event manager thread never parks, so it would
+// otherwise run a little deeper on every batch.
+static void __attribute__((noreturn)) workq_kevent_manager_jump(dthread_t self, int thread_port,
+		void* stacklowaddr, struct kevent_qos_s* events, int flags, int nevents)
+{
+#if __x86_64__
+	register void* arg1 asm("rdi") = self;
+	register int   arg2 asm("esi") = thread_port;
+	register void* arg3 asm("rdx") = stacklowaddr;
+	register void* arg4 asm("rcx") = events;
+	register int   arg5 asm("r8d") = flags;
+	register int   arg6 asm("r9d") = nevents;
+
+	// libpthread keeps the pthread_t at the top of a workqueue thread's stack.
+	__asm__ __volatile__ (
+		"movq %[stack_top], %%rsp\n"
+		"jmpq *%[wqueue_entry_point]\n"
+		::
+		"r"(arg1),"r"(arg2),"r"(arg3),"r"(arg4),"r"(arg5),"r"(arg6),
+		[stack_top] "r"((uintptr_t)self & ~(uintptr_t)15),
+		[wqueue_entry_point] "r"(wqueue_entry_point)
+	);
+#else
+	wqueue_entry_point_asm_jump(self, thread_port, stacklowaddr, events, flags, nevents);
+#endif
+	__builtin_unreachable();
+}
+
+// Waits for the next batch of kevents and runs the event manager thread with it.
+static void __attribute__((noreturn)) workq_kevent_manager_wait(dthread_t self, int thread_port,
+		void* stacklowaddr, int flags)
+{
+	struct kevent64_s events64[WQ_KEVENT_LIST_LEN];
+	int i, n;
+
+	do
+		n = sys_kevent64(workq_kevent_kq, NULL, 0, events64, WQ_KEVENT_LIST_LEN, 0, NULL);
+	while (n == 0 || n == -EINTR);
+
+	if (n < 0)
+	{
+		__simple_printf("workq: waiting for kevents failed: %d\n", n);
+		__simple_abort();
+	}
+
+	for (i = 0; i < n; i++)
+		kevent_64_to_qos(&events64[i], &workq_kevent_events[i]);
+
+	workq_kevent_manager_jump(self, thread_port, stacklowaddr, workq_kevent_events, flags, n);
+}
+
+static void workq_kevent_manager_start(void* self, int thread_port, void* stacklowaddr,
+		void* item, int flags, int nevents)
+{
+	sigexc_thread_setup();
+	workq_kevent_manager_wait(self, thread_port, stacklowaddr, flags);
+}
+
+// WQOPS_THREAD_KEVENT_RETURN: libdispatch has handled a batch and hands back the changes it made while doing so.
+static void __attribute__((noreturn)) workq_kevent_manager_return(const struct kevent_qos_s* changelist,
+		int nchanges)
+{
+	dthread_t self = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
+	int thread_port = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
+
+	if (nchanges > 0)
+	{
+		// XNU drops errors from these changes as well; the output list only makes sure all of them are applied
+		struct kevent_qos_s* errors = (struct kevent_qos_s*) __builtin_alloca(nchanges * sizeof(struct kevent_qos_s));
+		workq_kevent_apply(changelist, nchanges, errors, nchanges);
+	}
+
+	workq_kevent_manager_wait(self, thread_port, self->stackbottom,
+		WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_KEVENT | WQ_FLAG_THREAD_EVENT_MANAGER
+		| WQ_FLAG_THREAD_TSD_BASE_SET | WQ_FLAG_THREAD_REUSE);
+}
+
+long workq_kevent_register(const struct kevent_qos_s* changelist, int nchanges,
+		struct kevent_qos_s* eventlist, int nevents)
+{
+	int rv = workq_kevent_apply(changelist, nchanges, eventlist, nevents);
+	bool start_manager;
+
+	if (rv < 0)
+		return rv;
+
+	libsimple_lock_lock(&workq_kevent_lock);
+	start_manager = !workq_kevent_manager_started;
+	workq_kevent_manager_started = true;
+	libsimple_lock_unlock(&workq_kevent_lock);
+
+	if (start_manager)
+	{
+		__darling_thread_create(512*1024, pthread_obj_size, workq_kevent_manager_start, 0, NULL,
+				WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_KEVENT | WQ_FLAG_THREAD_EVENT_MANAGER, 0,
+				&callbacks, NULL);
+	}
+
+	return rv;
+}
+
+void workq_kevent_atfork_child(void)
+{
+	// kqueues and threads do not survive a fork
+	workq_kevent_lock = (libsimple_lock_t) LIBSIMPLE_LOCK_INITIALIZER;
+	workq_kevent_kq = -1;
+	workq_kevent_manager_started = false;
+}
+#else
+long workq_kevent_register(const struct kevent_qos_s* changelist, int nchanges,
+		struct kevent_qos_s* eventlist, int nevents)
+{
+	return -ENOSYS;
+}
+
+void workq_kevent_atfork_child(void)
+{
+}
+#endif
+
 long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 {
 #ifndef VARIANT_DYLD
-	struct wq_kevent_data* wq_event = NULL;
-	
 	// __simple_printf("workq_kernreturn: 0x%x, %p, 0x%x, 0x%x\n", options, item, affinity, prio);
 
 	// item is only used with WQOPS_QUEUE_ADD
 	switch (options)
 	{
 		case WQOPS_THREAD_KEVENT_RETURN:
-		{
-			struct kevent_qos_s* keventlist = item;
-			int nkevents = affinity;
-			
-			// __simple_printf("kevent return, obj=%p, nkevents=%d\n", wq_event, nkevents);
-
-			if (wq_event_pending != NULL)
-			{
-				int* sem;
-				if (nkevents > 0)
-					memmove(wq_event_pending->events, keventlist, nkevents * sizeof(struct kevent_qos_s));
-				wq_event_pending->nevents = nkevents;
-
-				sem = &wq_event_pending->sem;
-				wq_event_pending = NULL;
-				sem_up(sem);
-			}
-			else
-				__simple_printf("wq_event is NULL, something is going to get stuck forever\n");
-		}
+			// only the event manager thread services kevents
+			workq_kevent_manager_return(item, affinity);
 		case WQOPS_THREAD_RETURN:
 		{
 			// Signalizes that the thread has completed its job
@@ -211,18 +366,14 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 wakeup: // we actually want to go back into the thread to do work
 			// __simple_printf("Thread %d woken up, prio=%d\n", thread_self, me.flags & WQ_FLAG_THREAD_PRIOMASK);
 
-			if (me.event)
-				wq_event_pending = me.event;
-
 resume_thread: // we want the thread to resume, but it might be just to die
 			// reset stack and call entry point again with WQ_FLAG_THREAD_REUSE
 			thread_self = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
 			dthread = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
 
-			wqueue_entry_point_asm_jump(dthread, thread_self, dthread->stackbottom, 
-				(!terminating && me.event) ? me.event->events : NULL, 
+			wqueue_entry_point_asm_jump(dthread, thread_self, dthread->stackbottom, NULL,
 				me.flags | WQ_FLAG_THREAD_REUSE,
-				terminating ? WORKQ_EXIT_THREAD_NKEVENT : (me.event ? me.event->nevents : 0)
+				terminating ? WORKQ_EXIT_THREAD_NKEVENT : 0
 			);
 			
 			__builtin_unreachable();
@@ -232,11 +383,6 @@ resume_thread: // we want the thread to resume, but it might be just to die
 		case WQOPS_SET_EVENT_MANAGER_PRIORITY:
 		case WQOPS_QUEUE_NEWSPISUPP:
 			return 0;
-		case WQOPS_QUEUE_REQTHREAD_FOR_KEVENT:
-		{
-			wq_event = (struct wq_kevent_data*) item;
-			affinity = 1;
-		}
 		case WQOPS_QUEUE_REQTHREADS2: // with prop bucket
 		case WQOPS_QUEUE_REQTHREADS:
 		{
@@ -244,9 +390,6 @@ resume_thread: // we want the thread to resume, but it might be just to die
 
 			int i, flags = extract_wq_flags(prio);
 
-			if (wq_event != NULL)
-				flags |= WQ_FLAG_THREAD_KEVENT;
-			
 			// __simple_printf("Thread requested with prio %d\n", prio & WQ_FLAG_THREAD_PRIOMASK);
 
 			for (i = 0; i < affinity; i++)
@@ -266,7 +409,6 @@ resume_thread: // we want the thread to resume, but it might be just to die
 					// __simple_printf("Resuming thread %d\n", id);
 
 					thread->flags = flags;
-					thread->event = wq_event;
 
 					// Dequeue
 					TAILQ_REMOVE(&workq_parked_head, thread, entries);
@@ -280,13 +422,9 @@ resume_thread: // we want the thread to resume, but it might be just to die
 
 				libsimple_lock_unlock(&workq_parked_lock);
 
-				// __simple_printf("Spawning a new thread, nevents=%d\n", (wq_event != NULL) ? wq_event->nevents : -1);
-				wq_event_pending = wq_event;
-
+				// __simple_printf("Spawning a new thread\n");
 				__darling_thread_create(512*1024, pthread_obj_size, wqueue_entry_point_wrapper, 0,
-						(wq_event != NULL) ? wq_event->events : NULL, flags,
-						(wq_event != NULL) ? wq_event->nevents : 0,
-						&callbacks, NULL);
+						NULL, flags, 0, &callbacks, NULL);
 
 				/*if (ret < 0)
 				{

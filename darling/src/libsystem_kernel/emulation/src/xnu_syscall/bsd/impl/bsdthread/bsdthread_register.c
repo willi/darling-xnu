@@ -11,6 +11,7 @@
 #include <darling/emulation/common/simple.h>
 
 #include <darlingserver/rpc.h>
+#include <darling/emulation/common/libsystem.h>
 
 int pthread_obj_size;
 bsdthread_entry_t pthread_entry_point;
@@ -21,6 +22,8 @@ bsdwqthread_entry_t wqueue_entry_point;
 #define PTHREAD_FEATURE_QOS_DEFAULT 0x40000000
 #define WORKQ_FEATURE_FINEPRIO 0x02
 #define WORKQ_FEATURE_KEVENT 0x40
+#define PTHREAD_FEATURE_BSDTHREADCTL 0x04
+#define PTHREAD_FEATURE_SETSELF 0x08
 
 struct _pthread_registration_data {
 	uint64_t version;
@@ -48,6 +51,13 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 	if (dserver_rpc_set_thread_handles(pthread_handle, dispatch_qaddr) < 0) {
 		__simple_abort();
 	}
+
+	// Darling's libdispatch runs without kernel QoS or kevent workqueues. Apple's libdispatch (an iOS Simulator
+	// runtime) requires both; the kevent workqueue is emulated in workq_kernreturn.c.
+	if (__libkernel_has_apple_libsystem())
+		return PTHREAD_FEATURE_DISPATCHFUNC | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_BSDTHREADCTL
+			| PTHREAD_FEATURE_SETSELF | PTHREAD_FEATURE_QOS_MAINTENANCE | WORKQ_FEATURE_KEVENT
+			| PTHREAD_FEATURE_QOS_DEFAULT;
 
 	return /* WORKQ_FEATURE_KEVENT | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_QOS_MAINTENANCE 
 		| PTHREAD_FEATURE_DISPATCHFUNC | PTHREAD_FEATURE_QOS_DEFAULT */ 0;

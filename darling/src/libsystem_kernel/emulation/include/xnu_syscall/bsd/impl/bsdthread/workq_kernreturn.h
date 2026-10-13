@@ -4,19 +4,15 @@
 #define PRIVATE 1
 #include <sys/event.h>
 
-// Darling specific
-#define WQOPS_QUEUE_REQTHREAD_FOR_KEVENT  0x100020
-
-struct wq_kevent_data
-{
-	struct kevent_qos_s* events;
-	int nevents;
-	int sem;
-};
-
 struct timespec;
 
 long sys_workq_kernreturn(int options, void* item, int affinity, int prio);
+
+// kevent_qos(KEVENT_FLAG_WORKQ): changes to the process's kevent workqueue
+long workq_kevent_register(const struct kevent_qos_s* changelist, int nchanges,
+		struct kevent_qos_s* eventlist, int nevents);
+// the child of a fork has no kevent workqueue
+void workq_kevent_atfork_child(void);
 
 int sem_down(int* sem, int timeout);
 void sem_up(int* sem);
