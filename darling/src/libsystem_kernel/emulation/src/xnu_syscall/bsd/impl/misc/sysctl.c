@@ -40,13 +40,18 @@ const struct known_sysctl sysctls_root = {
 	.oid = 0, .type = CTLTYPE_NODE, .exttype = "", .name = "", .subctls = sysctls_global
 };
 
+// As XNU's sysctl_handle_string(), the length includes the terminating NUL: callers size their buffer with it, and
+// take a length of 0 as failure. A string longer than the buffer is truncated (XNU would fail with ENOMEM).
 void copyout_string(const char* str, char* out, unsigned long* out_len)
 {
-	unsigned long len;
-	if (out != NULL)
-		len = strlcpy(out, str, *out_len);
-	else
-		len = strlen(str);
+	unsigned long len = strlen(str) + 1;
+
+	if (out != NULL && out_len != NULL && *out_len > 0)
+	{
+		if (len > *out_len)
+			len = *out_len;
+		strlcpy(out, str, len);
+	}
 
 	if (out_len != NULL)
 		*out_len = len;
