@@ -239,6 +239,7 @@ typedef struct _posix_spawnattr {
 
 	cpu_subtype_t      psa_subcpuprefs[NBINPREFS];   /* subcpu affinity prefs*/
 	uint32_t        psa_options;             /* More options to be passed to posix_spawn */
+	int             psa_dataless_iopolicy;   /* materialize dataless iopolicy parameter */
 	/*
 	 * NOTE: Extensions array pointers must stay at the end so that
 	 * everything above this point stays the same size on different bitnesses
@@ -344,6 +345,8 @@ typedef struct _posix_spawnattr {
 __options_decl(posix_spawn_options, uint32_t, {
 	PSA_OPTION_NONE                         = 0,
 	PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS   = 0x1,
+	PSA_OPTION_ALT_ROSETTA                  = 0x2,
+	PSA_OPTION_DATALESS_IOPOLICY            = 0x4,
 });
 
 /*

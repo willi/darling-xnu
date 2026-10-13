@@ -21,7 +21,7 @@ long sys_sendmsg(int socket, const struct bsd_msghdr* msg, int flags)
 
 long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 {
-	int ret, linux_flags;
+	int ret, linux_flags, local_dgram;
 	struct linux_msghdr lmsg;
 	struct linux_cmsghdr* lchdr = NULL;
 	struct bsd_sockaddr* xname;
@@ -74,7 +74,7 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 
 	lmsg.msg_flags = 0; // ignored
 
-	linux_flags = msgflags_bsd_to_linux(flags);
+	linux_flags = local_dgram_send_flags(socket, msgflags_bsd_to_linux(flags), &local_dgram);
 
 #ifdef __NR_socketcall
 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDMSG,
@@ -83,6 +83,7 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 	ret = LINUX_SYSCALL(__NR_sendmsg, socket, &lmsg, linux_flags);
 #endif
 
+	ret = local_dgram_send_result(local_dgram, ret);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 

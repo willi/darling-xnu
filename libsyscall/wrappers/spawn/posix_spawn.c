@@ -171,6 +171,8 @@ posix_spawnattr_init(posix_spawnattr_t *attr)
 
 		/* Default is no option */
 		(*psattrp)->psa_options = PSA_OPTION_NONE;
+
+		(*psattrp)->psa_dataless_iopolicy = 0;
 	}
 
 	return err;
@@ -1102,6 +1104,36 @@ posix_spawnattr_disable_ptr_auth_a_keys_np(posix_spawnattr_t *attr, uint32_t fla
 
 	psattr->psa_options |= PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS;
 	(void)flags;
+	return 0;
+}
+
+/*
+ * posix_spawnattr_setdataless_iopolicy_np
+ *
+ * Description:	Set the process iopolicy to materialize dataless files
+ *
+ * Parameters:	attr			The spawn attributes object whose
+ *					iopolicy to materialize dataless files
+ *					is to be set
+ *		policy			io policy for dataless files
+ *
+ * Returns:	0			Success
+ *		EINVAL			Invalid Input
+ */
+int
+posix_spawnattr_setdataless_iopolicy_np(posix_spawnattr_t * __restrict attr,
+    const int policy)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	psattr->psa_options |= PSA_OPTION_DATALESS_IOPOLICY;
+	psattr->psa_dataless_iopolicy = policy;
+
 	return 0;
 }
 

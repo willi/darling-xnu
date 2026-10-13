@@ -22,7 +22,7 @@ long sys_sendto(int fd, const void* buffer, unsigned long length,
 long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 		int flags, const void* sockaddr, int socklen)
 {
-	int ret, linux_flags;
+	int ret, linux_flags, local_dgram;
 
 	struct sockaddr_fixup* fixed = NULL;
 
@@ -36,7 +36,7 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 			return ret;
 	}
 
-	linux_flags = msgflags_bsd_to_linux(flags);
+	linux_flags = local_dgram_send_flags(fd, msgflags_bsd_to_linux(flags), &local_dgram);
 
 #ifdef __NR_socketcall
 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDTO,
@@ -46,6 +46,7 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 			linux_flags, fixed, socklen);
 #endif
 
+	ret = local_dgram_send_result(local_dgram, ret);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 

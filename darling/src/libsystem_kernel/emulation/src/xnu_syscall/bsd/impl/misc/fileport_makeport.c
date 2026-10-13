@@ -2,21 +2,17 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
-#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
-#include <darling/emulation/other/mach/lkm.h>
+
+#include <darlingserver/rpc.h>
 
 long sys_fileport_makeport(int fd, int* port)
 {
-	struct fileport_makeport_args args;
+	uint32_t port_name = 0;
+	int code = dserver_rpc_fileport_makeport(fd, &port_name);
 
-	args.fd = fd;
-	args.port_out = 0;
+	if (code < 0)
+		return errno_linux_to_bsd(code);
 
-	int ret = lkm_call(NR_fileport_makeport, &args);
-
-	if (ret < 0)
-		return errno_linux_to_bsd(ret);
-
-	*port = args.port_out;
+	*port = port_name;
 	return 0;
 }

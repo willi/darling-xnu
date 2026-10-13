@@ -45,6 +45,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/getrlimit.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/getrusage.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/iopolicysys.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/misc/mac_syscall.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/ptrace.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/reboot.h>
@@ -431,6 +432,7 @@ void* __bsd_syscall_table[600] = {
 	[372] = sys_thread_selfid,
 	[374] = sys_kevent_qos,
 	[375] = sys_kevent_id,
+	[381] = sys_mac_syscall,
 	[394] = sys_pselect,
 	[395] = sys_pselect_nocancel,
 	[396] = sys_read_nocancel,
