@@ -8,8 +8,8 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent64.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 
 static const struct timespec polling_timeout = {};
 

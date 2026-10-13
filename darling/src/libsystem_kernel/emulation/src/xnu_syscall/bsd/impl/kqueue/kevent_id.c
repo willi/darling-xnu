@@ -11,11 +11,13 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/common/tsd.h>
+#include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/ext/futex.h>
+#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent64.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_qos.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_deferdelete.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kqueue.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 
@@ -28,22 +30,37 @@
 //   thread hands the queue over to it (NOTE_WL_SYNC_WAKE).
 // - ordinary knotes (Mach ports, timers, ...), whose events go to the workloop's servicer thread rather than to
 //   the process's kevent workqueue. They live on a libkqueue kqueue of the workloop's own (libkqueue tells
-//   knotes apart by ident and filter alone), which the kevent workqueue watches for readability.
+//   knotes apart by ident and filter alone), which a poller thread watches for readability.
 // While a thread other than the servicer owns the workloop (it holds the queue's drain lock, which libdispatch
 // tells us with NOTE_WL_DISCOVER_OWNER), no servicer is started; one starts once the owner ends its ownership.
+//
+// As in XNU, the servicer collects its events itself when it starts, is bound to its workloop until it parks, and
+// keeps servicing the workloop when it parks while there are events and no owner.
 //
 // The semantics follow XNU's filt_wl* functions in bsd/kern/kern_event.c, without the QoS overrides and
 // turnstiles, which only matter for priorities.
 
 extern void* calloc(__SIZE_TYPE__ count, __SIZE_TYPE__ size);
-extern void* realloc(void* ptr, __SIZE_TYPE__ size);
 extern void free(void* ptr);
 
-// tags the udata of a workloop's kqueue on the kevent workqueue; the rest is the workloop's id
-#define WORKLOOP_KQ_TAG 0x776c000000000000ull
-#define WORKLOOP_KQ_TAG_MASK 0xffff000000000000ull
-
 #define WORKLOOP_BUCKETS 64
+
+#define LINUX_EPOLL_CLOEXEC 02000000
+#define LINUX_EPOLL_CTL_ADD 1
+#define LINUX_EPOLL_CTL_DEL 2
+#define LINUX_EPOLL_CTL_MOD 3
+#define LINUX_EPOLLIN 0x001
+#define LINUX_EPOLLONESHOT (1u << 30)
+
+struct linux_epoll_event
+{
+	uint32_t events;
+	uint64_t data;
+}
+#ifdef __x86_64__
+__attribute__((packed))
+#endif
+;
 
 struct wl_knote
 {
@@ -58,17 +75,15 @@ struct wl_knote
 	bool dropped; // deleted while a thread was blocked on it; that thread frees it
 };
 
-struct wl_normal_knote
-{
-	uint64_t ident;
-	int16_t filter;
-};
-
 struct workloop
 {
-	struct workloop* next;
+	struct workloop* next; // in its bucket; under workloops_lock
 	uint64_t id;
-	int busy; // kevent_id() calls in progress
+	// kevent_id() calls in progress, the servicer and the poller each hold one; it only drops to zero under
+	// workloops_lock, and the workloop is freed then if it is idle
+	int refs;
+	// guards the rest
+	libsimple_lock_t lock;
 
 	struct wl_knote* knotes;
 	struct wl_knote* thread_request; // one of `knotes`
@@ -79,10 +94,9 @@ struct workloop
 	bool serviced; // a servicer was requested, or is running
 
 	int kq; // ordinary knotes; -1 until there is one
-	bool kq_armed; // the kevent workqueue reports `kq` becoming readable
-	bool kq_fired; // `kq` became readable while no servicer could start
-	struct wl_normal_knote* normal;
-	int nnormal, normal_capacity;
+	bool kq_armed; // the poller reports `kq` becoming readable
+	bool kq_fired; // `kq` became readable and wasn't polled since
+	struct kevent_deferdelete dd; // tracks `kq`'s knotes
 
 	// libpthread finds the workloop's id right before the events it hands to libdispatch
 	uint64_t servicer_id;
@@ -92,18 +106,13 @@ struct workloop
 _Static_assert(offsetof(struct workloop, servicer_events) == offsetof(struct workloop, servicer_id) + sizeof(uint64_t),
 		"libpthread expects the workloop id right before the events");
 
-// a servicer thread to start once the lock is dropped
-struct wl_dispatch
-{
-	struct kevent_qos_s* events;
-	int nevents;
-	unsigned long priority;
-};
-
-static libsimple_lock_t workloop_lock = LIBSIMPLE_LOCK_INITIALIZER;
+// Lock order: a workloop's lock, then workloops_lock.
+static libsimple_lock_t workloops_lock = LIBSIMPLE_LOCK_INITIALIZER;
 static struct workloop* workloops[WORKLOOP_BUCKETS];
+// the epoll instance the poller thread waits on; under workloops_lock
+static int poller_fd = -1;
 
-static const struct timespec polling_timeout = {};
+static bool wl_servicer_prepare(void* context, struct workq_batch* batch);
 
 // libdispatch stores thread port names without their low 2 bits (it uses them as flags)
 static uint32_t wl_port_mask(uint64_t name)
@@ -121,112 +130,142 @@ static struct workloop** wl_bucket(uint64_t id)
 	return &workloops[((id >> 4) ^ (id >> 12)) % WORKLOOP_BUCKETS];
 }
 
-static struct workloop* wl_find(uint64_t id)
+// Returns the workloop with `id` with a reference, creating it if `create`.
+static struct workloop* wl_get(uint64_t id, bool create)
 {
 	struct workloop* wl;
+
+	libsimple_lock_lock(&workloops_lock);
 
 	for (wl = *wl_bucket(id); wl != NULL; wl = wl->next)
 	{
 		if (wl->id == id)
-			return wl;
+			break;
 	}
-	return NULL;
-}
 
-static struct workloop* wl_create(uint64_t id)
-{
-	struct workloop** bucket = wl_bucket(id);
-	struct workloop* wl = calloc(1, sizeof(*wl));
+	if (wl == NULL && create)
+	{
+		wl = calloc(1, sizeof(*wl));
+		if (wl != NULL)
+		{
+			struct workloop** bucket = wl_bucket(id);
 
-	if (wl == NULL)
-		return NULL;
+			wl->id = wl->servicer_id = id;
+			wl->kq = -1;
+			wl->next = *bucket;
+			*bucket = wl;
+		}
+	}
 
-	wl->id = wl->servicer_id = id;
-	wl->kq = -1;
-	wl->next = *bucket;
-	*bucket = wl;
+	if (wl != NULL)
+		__atomic_add_fetch(&wl->refs, 1, __ATOMIC_RELAXED);
+
+	libsimple_lock_unlock(&workloops_lock);
 	return wl;
 }
 
-static struct workloop* wl_from_events(const void* events)
+// For a holder of a reference that already has the lock.
+static void wl_retain(struct workloop* wl)
 {
-	return (struct workloop*) ((char*) events - offsetof(struct workloop, servicer_events));
+	__atomic_add_fetch(&wl->refs, 1, __ATOMIC_RELAXED);
 }
 
-// Frees `wl` once nothing refers to it anymore, as XNU does with a workloop's last reference.
-static void wl_release(struct workloop* wl)
+// Drops a reference; frees `wl` with the last one if nothing refers to it anymore, as XNU does.
+static void wl_put(struct workloop* wl)
 {
 	struct workloop** link;
+	bool idle;
 
-	if (wl->busy || wl->serviced || wl->owner || wl->knotes != NULL || wl->nnormal > 0)
-		return;
+	libsimple_lock_lock(&workloops_lock);
 
-	if (wl->kq >= 0)
+	// with no reference left, nothing can change the workloop without taking workloops_lock first
+	idle = __atomic_sub_fetch(&wl->refs, 1, __ATOMIC_ACQ_REL) == 0 && !wl->serviced && !wl->owner
+		&& wl->knotes == NULL && kevent_dd_count(&wl->dd) == 0;
+	if (idle)
 	{
-		workq_kevent_watch_fd(wl->kq, WORKLOOP_KQ_TAG | wl->id, EV_DELETE);
-		sys_close(wl->kq);
+		for (link = wl_bucket(wl->id); *link != wl; link = &(*link)->next);
+		*link = wl->next;
+
+		if (wl->kq >= 0)
+			LINUX_SYSCALL(__NR_epoll_ctl, poller_fd, LINUX_EPOLL_CTL_DEL, wl->kq, NULL);
 	}
 
-	for (link = wl_bucket(wl->id); *link != wl; link = &(*link)->next);
-	*link = wl->next;
+	libsimple_lock_unlock(&workloops_lock);
 
-	free(wl->normal);
-	free(wl);
+	if (idle)
+	{
+		if (wl->kq >= 0)
+			sys_close(wl->kq);
+		kevent_dd_destroy(&wl->dd);
+		free(wl);
+	}
+}
+
+// The poller thread: reports workloops' kqueues becoming readable, so that they get a servicer. It is a thread of
+// its own so that this doesn't wait for the event manager or any servicer.
+static void wl_kq_fired(uint64_t id);
+
+static bool wl_poller_prepare(void* context, struct workq_batch* batch)
+{
+	struct linux_epoll_event events[WQ_KEVENT_LIST_LEN];
+	int i, n;
+
+	for (;;)
+	{
+		n = LINUX_SYSCALL(__NR_epoll_pwait, poller_fd, events, WQ_KEVENT_LIST_LEN, -1, NULL, 8);
+		if (n < 0)
+		{
+			n = errno_linux_to_bsd(n);
+			if (n == -EINTR)
+				continue;
+			__simple_printf("workloop: waiting for kqueues failed: %d\n", n);
+			__simple_abort();
+		}
+
+		for (i = 0; i < n; i++)
+			wl_kq_fired(events[i].data);
+	}
+}
+
+// Starts or stops reporting `wl`'s kqueue becoming readable, once (it is re-armed with LINUX_EPOLL_CTL_MOD).
+// Returns 0 or an error number.
+static int wl_watch_kq(struct workloop* wl, int op)
+{
+	struct linux_epoll_event event = { .events = LINUX_EPOLLIN | LINUX_EPOLLONESHOT, .data = wl->id };
+	bool start_poller = false;
+	int rv = 0;
+
+	libsimple_lock_lock(&workloops_lock);
+	if (poller_fd < 0)
+	{
+		rv = LINUX_SYSCALL(__NR_epoll_create1, LINUX_EPOLL_CLOEXEC);
+		if (rv >= 0)
+		{
+			poller_fd = rv;
+			start_poller = true;
+		}
+	}
+	if (poller_fd >= 0)
+		rv = LINUX_SYSCALL(__NR_epoll_ctl, poller_fd, op, wl->kq, &event);
+	libsimple_lock_unlock(&workloops_lock);
+
+	if (start_poller)
+		workq_thread_request(wl_poller_prepare, NULL);
+
+	return (rv < 0) ? -errno_linux_to_bsd(rv) : 0;
 }
 
 static void wl_arm_kq(struct workloop* wl)
 {
-	if (wl->kq >= 0 && !wl->kq_armed)
-	{
-		workq_kevent_watch_fd(wl->kq, WORKLOOP_KQ_TAG | wl->id, EV_ENABLE);
+	if (wl->kq >= 0 && !wl->kq_armed && wl_watch_kq(wl, LINUX_EPOLL_CTL_MOD) == 0)
 		wl->kq_armed = true;
-	}
-}
-
-// libkqueue does not say how many knotes a kqueue holds; the workloop keeps track to know when it is unused.
-static void wl_remember_normal(struct workloop* wl, uint64_t ident, int16_t filter)
-{
-	int i;
-
-	for (i = 0; i < wl->nnormal; i++)
-	{
-		if (wl->normal[i].ident == ident && wl->normal[i].filter == filter)
-			return;
-	}
-
-	if (wl->nnormal == wl->normal_capacity)
-	{
-		int capacity = wl->normal_capacity ? wl->normal_capacity * 2 : 4;
-		struct wl_normal_knote* normal = realloc(wl->normal, capacity * sizeof(*normal));
-
-		if (normal == NULL)
-			return;
-		wl->normal = normal;
-		wl->normal_capacity = capacity;
-	}
-
-	wl->normal[wl->nnormal++] = (struct wl_normal_knote) { .ident = ident, .filter = filter };
-}
-
-static void wl_forget_normal(struct workloop* wl, uint64_t ident, int16_t filter)
-{
-	int i;
-
-	for (i = 0; i < wl->nnormal; i++)
-	{
-		if (wl->normal[i].ident == ident && wl->normal[i].filter == filter)
-		{
-			wl->normal[i] = wl->normal[--wl->nnormal];
-			return;
-		}
-	}
 }
 
 // Collects the events for a servicer of `wl`: the thread request, unless another thread owns the workloop, and
 // whatever the ordinary knotes fired. As in XNU, delivering the thread request consumes it until it is touched.
 static int wl_collect_events(struct workloop* wl, struct kevent_qos_s* events, int nevents)
 {
-	int n = 0;
+	int n = 0, rv;
 
 	if (nevents > 0 && wl->thread_request != NULL && wl->thread_request_active && !wl->owner)
 	{
@@ -244,51 +283,98 @@ static int wl_collect_events(struct workloop* wl, struct kevent_qos_s* events, i
 		wl->thread_request_active = false;
 	}
 
-	if (wl->kq >= 0 && n < nevents)
+	if (n < nevents)
 	{
-		struct kevent64_s* events64 = (struct kevent64_s*) __builtin_alloca((nevents - n) * sizeof(struct kevent64_s));
-		int i, rv;
-
-		rv = sys_kevent64(wl->kq, NULL, 0, events64, nevents - n, 0, &polling_timeout);
-		for (i = 0; i < rv; i++)
-		{
-			if (events64[i].flags & EV_ONESHOT)
-				wl_forget_normal(wl, events64[i].ident, events64[i].filter);
-			kevent_64_to_qos(&events64[i], &events[n++]);
-		}
+		if (wl->kq >= 0)
+			wl->kq_fired = false;
+		rv = kevent_dd_collect(&wl->dd, wl->kq, events + n, nevents - n);
+		if (rv > 0)
+			n += rv;
 	}
 
 	return n;
 }
 
-static unsigned long wl_servicer_priority(const struct kevent_qos_s* events)
+static int wl_servicer_flags(const struct kevent_qos_s* events)
 {
+	unsigned long priority = _pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0);
+
 	if (events[0].filter == EVFILT_WORKLOOP && _pthread_priority_thread_qos(events[0].qos) != THREAD_QOS_UNSPECIFIED)
-		return events[0].qos;
-	return _pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0);
+		priority = events[0].qos;
+	return workq_thread_flags(priority) | WQ_FLAG_THREAD_KEVENT | WQ_FLAG_THREAD_WORKLOOP;
 }
 
-// Decides whether `wl` needs a servicer thread now; if so, the caller starts it with `dispatch` after unlocking.
-static bool wl_request_thread(struct workloop* wl, struct wl_dispatch* dispatch)
+// Decides whether `wl` needs a servicer thread now; if so, it takes a reference for it, and the caller passes
+// `wl` to workq_thread_request(wl_servicer_prepare) after unlocking.
+static bool wl_request_thread(struct workloop* wl)
 {
 	if (wl->serviced || wl->owner)
 		return false;
-	if (!(wl->thread_request != NULL && wl->thread_request_active) && !wl->kq_fired)
+	if (!(wl->thread_request != NULL && wl->thread_request_active) && !wl->kq_fired && !kevent_dd_pending(&wl->dd))
 		return false;
-
-	wl->kq_fired = false;
-	dispatch->nevents = wl_collect_events(wl, wl->servicer_events, WQ_KEVENT_LIST_LEN);
-	if (dispatch->nevents == 0)
-	{
-		wl_arm_kq(wl);
-		return false;
-	}
 
 	wl->serviced = true;
 	wl->servicer = 0;
-	dispatch->events = wl->servicer_events;
-	dispatch->priority = wl_servicer_priority(wl->servicer_events);
+	wl_retain(wl);
 	return true;
+}
+
+// On the thread answering a servicer request for `context`, before it enters libdispatch.
+static bool wl_servicer_prepare(void* context, struct workq_batch* batch)
+{
+	struct workloop* wl = context;
+	int n = 0;
+
+	libsimple_lock_lock(&wl->lock);
+
+	// another thread may have taken ownership since the request
+	if (!wl->owner)
+		n = wl_collect_events(wl, wl->servicer_events, WQ_KEVENT_LIST_LEN);
+
+	if (n == 0)
+	{
+		wl->serviced = false;
+		wl_arm_kq(wl);
+		libsimple_lock_unlock(&wl->lock);
+		wl_put(wl);
+		return false;
+	}
+
+	wl->servicer = wl_self();
+	libsimple_lock_unlock(&wl->lock);
+
+	// Like XNU's uu_kqr_bound, this binds the thread to the workloop until it parks.
+	_pthread_setspecific_direct(__PTK_DARLING_WORKLOOP, wl);
+
+	*batch = (struct workq_batch) {
+		.events = wl->servicer_events,
+		.nevents = n,
+		.flags = wl_servicer_flags(wl->servicer_events),
+	};
+	return true;
+}
+
+static void wl_kq_fired(uint64_t id)
+{
+	// the workloop may be gone, or even have been replaced by another with the same id; that only costs a poll
+	struct workloop* wl = wl_get(id, false);
+	bool start_servicer = false;
+
+	if (wl == NULL)
+		return;
+
+	libsimple_lock_lock(&wl->lock);
+	if (wl->kq >= 0)
+	{
+		wl->kq_armed = false;
+		wl->kq_fired = true;
+		start_servicer = wl_request_thread(wl);
+	}
+	libsimple_lock_unlock(&wl->lock);
+
+	if (start_servicer)
+		workq_thread_request(wl_servicer_prepare, wl);
+	wl_put(wl);
 }
 
 static struct wl_knote* wl_knote_find(struct workloop* wl, uint64_t ident)
@@ -332,20 +418,19 @@ static void wl_knote_drop(struct workloop* wl, struct wl_knote* kn)
 // Blocks the calling thread on a NOTE_WL_SYNC_WAIT knote until it is woken or deleted.
 static void wl_sync_wait(struct workloop* wl, struct wl_knote* kn)
 {
-	struct wl_dispatch dispatch;
 	// whoever is to wake this thread up may need a servicer first
-	bool start_servicer = wl_request_thread(wl, &dispatch);
+	bool start_servicer = wl_request_thread(wl);
 
 	kn->waiting = true;
-	libsimple_lock_unlock(&workloop_lock);
+	libsimple_lock_unlock(&wl->lock);
 
 	if (start_servicer)
-		workq_workloop_thread_request(dispatch.events, dispatch.nevents, dispatch.priority);
+		workq_thread_request(wl_servicer_prepare, wl);
 
 	while (!__atomic_load_n(&kn->woken, __ATOMIC_ACQUIRE))
 		__linux_futex(&kn->woken, FUTEX_WAIT, 0, NULL, NULL, 0);
 
-	libsimple_lock_lock(&workloop_lock);
+	libsimple_lock_lock(&wl->lock);
 	kn->waiting = false;
 	if (kn->dropped)
 		free(kn);
@@ -555,12 +640,10 @@ static int wl_register(struct workloop* wl, struct kevent_qos_s* kev)
 // Applies a change to an ordinary knote (anything but EVFILT_WORKLOOP) of `wl`.
 static int wl_register_normal(struct workloop* wl, struct kevent_qos_s* kev)
 {
-	struct kevent64_s change, error;
-	long rv;
-
 	if (wl->kq < 0)
 	{
-		int kq;
+		long kq;
+		int error;
 
 		if (!(kev->flags & EV_ADD))
 			return ENOENT;
@@ -570,28 +653,18 @@ static int wl_register_normal(struct workloop* wl, struct kevent_qos_s* kev)
 			return -kq;
 		sys_fcntl(kq, F_SETFD, FD_CLOEXEC);
 
-		rv = workq_kevent_watch_fd(kq, WORKLOOP_KQ_TAG | wl->id, EV_ADD);
-		if (rv < 0)
-		{
-			sys_close(kq);
-			return -rv;
-		}
 		wl->kq = kq;
+		error = wl_watch_kq(wl, LINUX_EPOLL_CTL_ADD);
+		if (error)
+		{
+			wl->kq = -1;
+			sys_close(kq);
+			return error;
+		}
 		wl->kq_armed = true;
 	}
 
-	kevent_qos_to_64(kev, &change);
-	rv = sys_kevent64(wl->kq, &change, 1, &error, 1, KEVENT_FLAG_ERROR_EVENTS, NULL);
-	if (rv < 0)
-		return -rv;
-	if (rv > 0 && (error.flags & EV_ERROR) && error.data != 0)
-		return error.data;
-
-	if (kev->flags & EV_DELETE)
-		wl_forget_normal(wl, kev->ident, kev->filter);
-	else if (kev->flags & EV_ADD)
-		wl_remember_normal(wl, kev->ident, kev->filter);
-	return 0;
+	return kevent_dd_register(&wl->dd, wl->kq, kev);
 }
 
 // Applies `changelist` to `wl` in order, reporting failed changes in `errors` (at most `nerrors` of them).
@@ -621,33 +694,18 @@ long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchan
 		void* data_out, unsigned long* data_available, unsigned int flags)
 {
 	struct workloop* wl;
-	struct wl_dispatch dispatch;
 	bool start_servicer;
 	int n;
 
 	if (!(flags & KEVENT_FLAG_WORKLOOP) || nchanges < 0 || nevents < 0)
 		return -EINVAL;
 
-	libsimple_lock_lock(&workloop_lock);
-
-	wl = wl_find(id);
+	wl = wl_get(id, !(flags & KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST));
 	if (wl == NULL)
-	{
-		if (flags & KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST)
-		{
-			libsimple_lock_unlock(&workloop_lock);
-			return -ENOENT;
-		}
+		return (flags & KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST) ? -ENOENT : -ENOMEM;
 
-		wl = wl_create(id);
-		if (wl == NULL)
-		{
-			libsimple_lock_unlock(&workloop_lock);
-			return -ENOMEM;
-		}
-	}
+	libsimple_lock_lock(&wl->lock);
 
-	wl->busy++;
 	n = wl_apply_changes(wl, changelist, nchanges, eventlist, nevents);
 
 	// Without KEVENT_FLAG_ERROR_EVENTS, the servicer is polling for more events. Like XNU, report errors
@@ -655,94 +713,79 @@ long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchan
 	if (!(flags & KEVENT_FLAG_ERROR_EVENTS) && n == 0)
 		n = wl_collect_events(wl, eventlist, nevents);
 
-	start_servicer = wl_request_thread(wl, &dispatch);
-	wl->busy--;
-	wl_release(wl);
+	start_servicer = wl_request_thread(wl);
 
-	libsimple_lock_unlock(&workloop_lock);
+	libsimple_lock_unlock(&wl->lock);
 
 	if (start_servicer)
-		workq_workloop_thread_request(dispatch.events, dispatch.nevents, dispatch.priority);
+		workq_thread_request(wl_servicer_prepare, wl);
+	wl_put(wl);
 
 	return n;
 }
 
-bool workloop_is_kq_event(int16_t filter, uint64_t udata)
-{
-	return filter == EVFILT_READ && (udata & WORKLOOP_KQ_TAG_MASK) == WORKLOOP_KQ_TAG;
-}
-
-void workloop_kq_fired(uint64_t udata)
-{
-	struct workloop* wl;
-	struct wl_dispatch dispatch;
-	bool start_servicer = false;
-
-	libsimple_lock_lock(&workloop_lock);
-
-	// the workloop may be gone, or even have been replaced by another with the same id; that only costs a poll
-	wl = wl_find(udata & ~WORKLOOP_KQ_TAG_MASK);
-	if (wl != NULL)
-	{
-		// the kqueue is watched with EV_DISPATCH
-		wl->kq_armed = false;
-		wl->kq_fired = true;
-		start_servicer = wl_request_thread(wl, &dispatch);
-	}
-
-	libsimple_lock_unlock(&workloop_lock);
-
-	if (start_servicer)
-		workq_workloop_thread_request(dispatch.events, dispatch.nevents, dispatch.priority);
-}
-
-void workloop_servicer_started(void* events, int thread_port)
-{
-	struct workloop* wl = wl_from_events(events);
-
-	libsimple_lock_lock(&workloop_lock);
-	wl->servicer = wl_port_mask(thread_port);
-	if (wl->owner == wl->servicer)
-		wl->owner = 0;
-	libsimple_lock_unlock(&workloop_lock);
-}
-
 void workloop_servicer_return(const struct kevent_qos_s* changelist, int nchanges)
 {
-	struct workloop* wl = wl_from_events(changelist);
+	struct workloop* wl = _pthread_getspecific_direct(__PTK_DARLING_WORKLOOP);
+	struct kevent_qos_s* changes = NULL;
+	struct workq_batch batch;
 	int n;
 
-	libsimple_lock_lock(&workloop_lock);
+	if (wl == NULL)
+	{
+		__simple_printf("workloop: WQOPS_THREAD_WORKLOOP_RETURN from a thread that services no workloop\n");
+		__simple_abort();
+	}
 
-	wl_apply_changes(wl, changelist, nchanges, NULL, 0);
+	// the changes are usually in `wl->servicer_events`, which the errors overwrite
+	if (nchanges > 0)
+	{
+		changes = __builtin_alloca(nchanges * sizeof(*changes));
+		__builtin_memcpy(changes, changelist, nchanges * sizeof(*changes));
+	}
 
-	// As in XNU, a parking servicer keeps servicing its workloop while that has events and no owner.
-	n = wl->owner ? 0 : wl_collect_events(wl, wl->servicer_events, WQ_KEVENT_LIST_LEN);
+	libsimple_lock_lock(&wl->lock);
+
+	// As on XNU's parking path, changes that fail are the servicer's next batch, ahead of any event: libdispatch
+	// recovers from some (_dispatch_kevent_workloop_poke_drain()) and crashes on the others. Otherwise, the
+	// servicer keeps servicing the workloop while that has events and no owner.
+	n = wl_apply_changes(wl, changes, nchanges, wl->servicer_events, WQ_KEVENT_LIST_LEN);
+	if (n == 0 && !wl->owner)
+		n = wl_collect_events(wl, wl->servicer_events, WQ_KEVENT_LIST_LEN);
+
 	if (n > 0)
 	{
-		unsigned long priority = wl_servicer_priority(wl->servicer_events);
-
-		libsimple_lock_unlock(&workloop_lock);
-		workq_workloop_thread_continue(wl->servicer_events, n, priority);
+		batch = (struct workq_batch) {
+			.events = wl->servicer_events,
+			.nevents = n,
+			.flags = wl_servicer_flags(wl->servicer_events),
+		};
+		libsimple_lock_unlock(&wl->lock);
+		workq_thread_enter(&batch);
 	}
 
 	wl->serviced = false;
 	wl->servicer = 0;
-	wl->kq_fired = false;
 	wl_arm_kq(wl);
-	wl_release(wl);
 
-	libsimple_lock_unlock(&workloop_lock);
+	libsimple_lock_unlock(&wl->lock);
 
-	workq_workloop_thread_park();
+	_pthread_setspecific_direct(__PTK_DARLING_WORKLOOP, NULL);
+	wl_put(wl);
+
+	workq_thread_return();
 }
 
 void workloop_atfork_child(void)
 {
-	// The child has none of the parent's threads or kqueues; its libdispatch starts over with no workloops.
-	// The parent's are leaked rather than freed, as they may be in an inconsistent state.
-	workloop_lock = (libsimple_lock_t) LIBSIMPLE_LOCK_INITIALIZER;
+	// The child has none of the parent's threads, and libkqueue closes the parent's kqueues in it; its
+	// libdispatch starts over with no workloops. The parent's are leaked rather than freed: this runs before
+	// libSystem makes malloc usable again in the child.
+	workloops_lock = (libsimple_lock_t) LIBSIMPLE_LOCK_INITIALIZER;
 	__builtin_memset(workloops, 0, sizeof(workloops));
+	if (poller_fd >= 0)
+		LINUX_SYSCALL1(__NR_close, poller_fd);
+	poller_fd = -1;
 }
 #else
 long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchanges,
@@ -750,5 +793,9 @@ long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchan
 		void* data_out, unsigned long* data_available, unsigned int flags)
 {
 	return -ENOSYS;
+}
+
+void workloop_atfork_child(void)
+{
 }
 #endif

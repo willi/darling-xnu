@@ -15,6 +15,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 
 #include <darlingserver/rpc.h>
 

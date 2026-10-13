@@ -24,10 +24,8 @@
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/linux_premigration/signal/sigexc.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kqueue.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent64.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_qos.h>
+
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 
 #include <elfcalls/threads.h>
@@ -50,26 +48,6 @@
 #define WQOPS_SET_EVENT_MANAGER_PRIORITY 0x80
 #define WQOPS_SETUP_DISPATCH 0x400
 
-// Flags for the newly spawned thread:
-// WQ_FLAG_THREAD_NEWSPI
-// WQ_FLAG_THREAD_REUSE (0 if thread is newly spawned)
-// item is unused in "new SPI"
-
-#define WQ_FLAG_THREAD_PRIO_SCHED    0x00008000
-#define WQ_FLAG_THREAD_PRIO_QOS      0x00004000
-#define WQ_FLAG_THREAD_PRIO_MASK     0x00000fff
-
-#define WQ_FLAG_THREAD_OVERCOMMIT    0x00010000
-#define WQ_FLAG_THREAD_REUSE         0x00020000
-#define WQ_FLAG_THREAD_NEWSPI        0x00040000
-#define WQ_FLAG_THREAD_KEVENT        0x00080000
-#define WQ_FLAG_THREAD_EVENT_MANAGER 0x00100000
-#define WQ_FLAG_THREAD_TSD_BASE_SET  0x00200000
-#define WQ_FLAG_THREAD_WORKLOOP      0x00400000
-#define WQ_FLAG_THREAD_OUTSIDEQOS    0x00800000
-
-#define WORKQ_EXIT_THREAD_NKEVENT (-1)
-
 static int workq_sem = WQ_MAX_THREADS; // max 64 threads in use
 static libsimple_lock_t workq_parked_lock = LIBSIMPLE_LOCK_INITIALIZER;
 // static int workq_parked_threads = 0; // num spawned, but unused threads
@@ -80,11 +58,20 @@ TAILQ_HEAD(tailhead, parked_thread) workq_parked_head = TAILQ_HEAD_INITIALIZER(w
 
 struct parked_thread
 {
-	int sem, flags;
-	// what to wake up with; events are only for workloop servicers
-	void* events;
-	int nevents;
+	int sem;
+	// what the thread is woken up for: a WQOPS_QUEUE_REQTHREADS request with `flags`,
+	// or a workq_thread_request() if `prepare` is set
+	int flags;
+	workq_prepare_f prepare;
+	void* context;
 	TAILQ_ENTRY(parked_thread) entries;
+};
+
+// a workq_thread_request() answered by a new thread
+struct workq_request
+{
+	workq_prepare_f prepare;
+	void* context;
 };
 
 static void list_add(struct parked_thread* head, struct parked_thread* item);
@@ -126,192 +113,54 @@ static int extract_wq_flags(int priority) {
 };
 
 #ifndef VARIANT_DYLD
-// XNU's kevent workqueue (WORKQ_FEATURE_KEVENT), which Apple's libdispatch requires: knotes registered with
-// kevent_qos(KEVENT_FLAG_WORKQ) live on a kqueue of their own, and the events they fire are handed to
-// workqueue threads instead of being returned to whoever registered them. Here, a single event manager thread
-// waits on that kqueue, passes each batch to libdispatch's kevent callback and applies the changes the callback
-// returns before it waits again, so no event is delivered twice while libdispatch handles it.
-static libsimple_lock_t workq_kevent_lock = LIBSIMPLE_LOCK_INITIALIZER;
-static int workq_kevent_kq = -1;
-static bool workq_kevent_manager_started = false;
-static struct kevent_qos_s workq_kevent_events[WQ_KEVENT_LIST_LEN];
+extern void* calloc(__SIZE_TYPE__ count, __SIZE_TYPE__ size);
+extern void free(void* ptr);
 
-static int workq_kevent_get_kq(void)
+int workq_thread_flags(unsigned long priority)
 {
-	libsimple_lock_lock(&workq_kevent_lock);
-	if (workq_kevent_kq < 0)
-	{
-		workq_kevent_kq = sys_kqueue();
-		if (workq_kevent_kq >= 0)
-			sys_fcntl(workq_kevent_kq, F_SETFD, FD_CLOEXEC);
-	}
-	libsimple_lock_unlock(&workq_kevent_lock);
-	return workq_kevent_kq;
+	return extract_wq_flags(priority);
 }
 
-// Applies `changelist` to the kevent workqueue. Like XNU, only failed changes (and those with EV_RECEIPT) are
-// reported in `eventlist`; if it has no room, the first failure fails the call.
-static int workq_kevent_apply(const struct kevent_qos_s* changelist, int nchanges,
-		struct kevent_qos_s* eventlist, int nevents)
-{
-	struct kevent64_s* changelist64 = NULL;
-	struct kevent64_s* eventlist64 = NULL;
-	int kq, rv, i;
-
-	kq = workq_kevent_get_kq();
-	if (kq < 0)
-		return kq;
-
-	if (nchanges > 0)
-	{
-		changelist64 = (struct kevent64_s*) __builtin_alloca(nchanges * sizeof(struct kevent64_s));
-		for (i = 0; i < nchanges; i++)
-			kevent_qos_to_64(&changelist[i], &changelist64[i]);
-	}
-	if (nevents > 0)
-		eventlist64 = (struct kevent64_s*) __builtin_alloca(nevents * sizeof(struct kevent64_s));
-
-	rv = sys_kevent64(kq, changelist64, nchanges, eventlist64, nevents, KEVENT_FLAG_ERROR_EVENTS, NULL);
-
-	for (i = 0; i < rv; i++)
-		kevent_64_to_qos(&eventlist64[i], &eventlist[i]);
-	return rv;
-}
-
-// Waits for the next batch of kevents and runs the event manager thread with it.
-static void __attribute__((noreturn)) workq_kevent_manager_wait(dthread_t self, int thread_port,
-		void* stacklowaddr, int flags)
-{
-	struct kevent64_s events64[WQ_KEVENT_LIST_LEN];
-	int i, n, nevents = 0;
-
-	while (nevents == 0)
-	{
-		n = sys_kevent64(workq_kevent_kq, NULL, 0, events64, WQ_KEVENT_LIST_LEN, 0, NULL);
-		if (n == -EINTR)
-			continue;
-		if (n < 0)
-		{
-			__simple_printf("workq: waiting for kevents failed: %d\n", n);
-			__simple_abort();
-		}
-
-		for (i = 0; i < n; i++)
-		{
-			// workloops' kqueues fire for their servicers, not for libdispatch's event manager
-			if (workloop_is_kq_event(events64[i].filter, events64[i].udata))
-				workloop_kq_fired(events64[i].udata);
-			else
-				kevent_64_to_qos(&events64[i], &workq_kevent_events[nevents++]);
-		}
-	}
-
-	wqueue_entry_point_asm_jump(self, thread_port, stacklowaddr, workq_kevent_events, flags, nevents);
-}
-
-static void workq_kevent_manager_start(void* self, int thread_port, void* stacklowaddr,
-		void* item, int flags, int nevents)
-{
-	sigexc_thread_setup();
-	workq_kevent_manager_wait(self, thread_port, stacklowaddr, flags);
-}
-
-// WQOPS_THREAD_KEVENT_RETURN: libdispatch has handled a batch and hands back the changes it made while doing so.
-static void __attribute__((noreturn)) workq_kevent_manager_return(const struct kevent_qos_s* changelist,
-		int nchanges)
+void workq_thread_enter(const struct workq_batch* batch)
 {
 	dthread_t self = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
 	int thread_port = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
 
-	if (nchanges > 0)
-	{
-		// XNU drops errors from these changes as well; the output list only makes sure all of them are applied
-		struct kevent_qos_s* errors = (struct kevent_qos_s*) __builtin_alloca(nchanges * sizeof(struct kevent_qos_s));
-		workq_kevent_apply(changelist, nchanges, errors, nchanges);
-	}
-
-	workq_kevent_manager_wait(self, thread_port, self->stackbottom,
-		WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_KEVENT | WQ_FLAG_THREAD_EVENT_MANAGER
-		| WQ_FLAG_THREAD_TSD_BASE_SET | WQ_FLAG_THREAD_REUSE);
+	wqueue_entry_point_asm_jump(self, thread_port, self->stackbottom, batch->events,
+		batch->flags | WQ_FLAG_THREAD_REUSE | WQ_FLAG_THREAD_TSD_BASE_SET, batch->nevents);
 }
 
-static void workq_kevent_start_manager(void)
+static void workq_requested_thread_start(void* self, int thread_port, void* stacklowaddr,
+		void* item, int flags, int nevents)
 {
-	bool start_manager;
+	struct workq_request request = *(struct workq_request*) item;
+	struct workq_batch batch;
 
-	libsimple_lock_lock(&workq_kevent_lock);
-	start_manager = !workq_kevent_manager_started;
-	workq_kevent_manager_started = true;
-	libsimple_lock_unlock(&workq_kevent_lock);
+	free(item);
+	sigexc_thread_setup();
 
-	if (start_manager)
-	{
-		__darling_thread_create(512*1024, pthread_obj_size, workq_kevent_manager_start, 0, NULL,
-				WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_KEVENT | WQ_FLAG_THREAD_EVENT_MANAGER, 0,
-				&callbacks, NULL);
-	}
+	// with nothing to do, the thread enters _start_wqthread just to terminate
+	if (!request.prepare(request.context, &batch))
+		batch = (struct workq_batch) { .events = NULL, .nevents = WORKQ_EXIT_THREAD_NKEVENT, .flags = flags };
+
+	// the thread's TSD base is already set, as `flags` says
+	wqueue_entry_point_asm_jump(self, thread_port, stacklowaddr, batch.events,
+		batch.flags | (flags & WQ_FLAG_THREAD_TSD_BASE_SET), batch.nevents);
 }
 
-long workq_kevent_register(const struct kevent_qos_s* changelist, int nchanges,
-		struct kevent_qos_s* eventlist, int nevents)
+void workq_thread_request(workq_prepare_f prepare, void* context)
 {
-	int rv = workq_kevent_apply(changelist, nchanges, eventlist, nevents);
-
-	if (rv < 0)
-		return rv;
-
-	workq_kevent_start_manager();
-	return rv;
-}
-
-int workq_kevent_watch_fd(int fd, uint64_t udata, uint16_t action)
-{
-	struct kevent_qos_s change = {
-		.ident = fd,
-		.filter = EVFILT_READ,
-		.flags = (action & EV_ADD) ? (EV_ADD | EV_ENABLE | EV_DISPATCH) : action,
-		.udata = udata,
-	};
-	struct kevent_qos_s error;
-	int rv = workq_kevent_apply(&change, 1, &error, 1);
-
-	if (rv < 0)
-		return rv;
-	if (rv > 0 && (error.flags & EV_ERROR) && error.data != 0)
-		return -error.data;
-
-	if (action & EV_ADD)
-		workq_kevent_start_manager();
-	return 0;
-}
-
-static int workq_workloop_thread_flags(unsigned long priority)
-{
-	return extract_wq_flags(priority) | WQ_FLAG_THREAD_KEVENT | WQ_FLAG_THREAD_WORKLOOP;
-}
-
-static void workq_workloop_thread_start(void* self, int thread_port, void* stackaddr,
-		void* events, int flags, int nevents)
-{
-	workloop_servicer_started(events, thread_port);
-	wqueue_entry_point_wrapper(self, thread_port, stackaddr, events, flags, nevents);
-}
-
-void workq_workloop_thread_request(struct kevent_qos_s* events, int nevents, unsigned long priority)
-{
-	int flags = workq_workloop_thread_flags(priority);
 	struct parked_thread* thread;
+	struct workq_request* request;
 
-	// Workloop servicers are not counted against WQ_MAX_THREADS: requesting one must not block.
 	libsimple_lock_lock(&workq_parked_lock);
 
 	thread = workq_parked_head.tqh_first;
 	if (thread != NULL)
 	{
 		TAILQ_REMOVE(&workq_parked_head, thread, entries);
-		thread->flags = flags;
-		thread->events = events;
-		thread->nevents = nevents;
+		thread->prepare = prepare;
+		thread->context = context;
 		sem_up(&thread->sem);
 		libsimple_lock_unlock(&workq_parked_lock);
 		return;
@@ -319,119 +168,94 @@ void workq_workloop_thread_request(struct kevent_qos_s* events, int nevents, uns
 
 	libsimple_lock_unlock(&workq_parked_lock);
 
-	__darling_thread_create(512*1024, pthread_obj_size, workq_workloop_thread_start, 0,
-			(uintptr_t) events, flags, nevents, &callbacks, NULL);
+	request = calloc(1, sizeof(*request));
+	if (request == NULL)
+	{
+		__simple_printf("workq: out of memory for a thread request\n");
+		__simple_abort();
+	}
+	request->prepare = prepare;
+	request->context = context;
+
+	__darling_thread_create(512*1024, pthread_obj_size, workq_requested_thread_start, 0, (uintptr_t) request,
+			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0, &callbacks, NULL);
 }
 
-void workq_workloop_thread_continue(struct kevent_qos_s* events, int nevents, unsigned long priority)
-{
-	dthread_t self = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
-	int thread_port = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
-
-	wqueue_entry_point_asm_jump(self, thread_port, self->stackbottom, events,
-		workq_workloop_thread_flags(priority) | WQ_FLAG_THREAD_TSD_BASE_SET | WQ_FLAG_THREAD_REUSE, nevents);
-}
-
-void workq_kevent_atfork_child(void)
-{
-	// kqueues and threads do not survive a fork
-	workq_kevent_lock = (libsimple_lock_t) LIBSIMPLE_LOCK_INITIALIZER;
-	workq_kevent_kq = -1;
-	workq_kevent_manager_started = false;
-	workloop_atfork_child();
-}
-#else
-long workq_kevent_register(const struct kevent_qos_s* changelist, int nchanges,
-		struct kevent_qos_s* eventlist, int nevents)
-{
-	return -ENOSYS;
-}
-
-void workq_kevent_atfork_child(void)
-{
-}
-#endif
-
-#ifndef VARIANT_DYLD
-// Parks the calling workqueue thread until a thread request (or a workloop) needs it, or terminates it if none
-// does for a while. `counted` threads were started by WQOPS_QUEUE_REQTHREADS and count against WQ_MAX_THREADS.
+// Parks the calling workqueue thread until a request needs it, or terminates it if none does for a while.
+// `counted` threads came from WQOPS_QUEUE_REQTHREADS and count against WQ_MAX_THREADS until they park.
 static void __attribute__((noreturn)) workq_thread_park(bool counted)
 {
-	int thread_self, prio;
 	struct parked_thread me;
-	dthread_t dthread;
-	bool terminating = false;
+	struct workq_batch batch;
 
+park:
 	libsimple_lock_lock(&workq_parked_lock);
 
 	// Semaphore locked state (wait for wakeup)
 	me.sem = 0;
-	me.events = NULL;
-	me.nevents = 0;
+	me.prepare = NULL;
+	me.context = NULL;
 
-	// extract initial flags
-	// (in case we only get created and used once and then terminate; `_pthread_wqthread` requires a valid `flags` argument)
-	dthread = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
-	prio = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_QOS_CLASS);
-	// doesn't extract `WQ_FLAG_THREAD_KEVENT` if we had it set, but that shouldn't matter
-	// like i said before, the only case where we actually need these flags to be set here is when the thread is going to die immediately after creation
-	me.flags = extract_wq_flags(prio);
+	// `_start_wqthread` requires valid flags even when the thread is only resumed to terminate
+	me.flags = extract_wq_flags(_pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_QOS_CLASS));
 
-	// Enqueue for future WQOPS_QUEUE_REQTHREADS
+	// Enqueue for future requests
 	TAILQ_INSERT_HEAD(&workq_parked_head, &me, entries);
 
 	// Decrease the amount of running threads
 	if (counted)
 		sem_up(&workq_sem);
+	counted = false;
 
 	libsimple_lock_unlock(&workq_parked_lock);
 
-	// Wait until someone calls WQOPS_QUEUE_REQTHREADS
-	// and wakes us up
+	// Wait until a request wakes us up
 	if (!sem_down(&me.sem, 15))
 	{
 		// Make sure we haven't just been woken up before locking the queue
 		// and remove us from the queue if not.
 		libsimple_lock_lock(&workq_parked_lock);
-	
+
 		if (me.sem > 0)
 		{
 			libsimple_lock_unlock(&workq_parked_lock);
-			goto wakeup;
+			goto woken;
 		}
 
 		TAILQ_REMOVE(&workq_parked_head, &me, entries);
 
 		libsimple_lock_unlock(&workq_parked_lock);
 
-		terminating = true;
-
 		// resume the thread; it'll call `_pthread_wqthread_exit` and kill itself
-		goto resume_thread;
+		batch = (struct workq_batch) { .events = NULL, .nevents = WORKQ_EXIT_THREAD_NKEVENT, .flags = me.flags };
+		workq_thread_enter(&batch);
 	}
 
-wakeup: // we actually want to go back into the thread to do work
-	// __simple_printf("Thread %d woken up, prio=%d\n", thread_self, me.flags & WQ_FLAG_THREAD_PRIOMASK);
+woken:
+	// Whoever woke us up has unlinked `me` and is done with it, so the stack it lives on may be reused.
+	if (me.prepare == NULL)
+		batch = (struct workq_batch) { .events = NULL, .nevents = 0, .flags = me.flags };
+	else if (!me.prepare(me.context, &batch))
+		goto park;
 
-resume_thread: // we want the thread to resume, but it might be just to die
-	// reset stack and call entry point again with WQ_FLAG_THREAD_REUSE
-	thread_self = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
-	dthread = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
-
-	if (!terminating && (me.flags & WQ_FLAG_THREAD_WORKLOOP))
-		workloop_servicer_started(me.events, thread_self);
-
-	wqueue_entry_point_asm_jump(dthread, thread_self, dthread->stackbottom, me.events,
-		me.flags | WQ_FLAG_THREAD_REUSE,
-		terminating ? WORKQ_EXIT_THREAD_NKEVENT : me.nevents
-	);
-
-	__builtin_unreachable();
+	workq_thread_enter(&batch);
 }
 
-void workq_workloop_thread_park(void)
+void workq_thread_return(void)
 {
 	workq_thread_park(false);
+}
+
+void workq_atfork_child(void)
+{
+	// none of the parent's threads exist in the child
+	workq_parked_lock = (libsimple_lock_t) LIBSIMPLE_LOCK_INITIALIZER;
+	TAILQ_INIT(&workq_parked_head);
+	workq_sem = WQ_MAX_THREADS;
+}
+#else
+void workq_atfork_child(void)
+{
 }
 #endif
 
@@ -444,9 +268,10 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 	switch (options)
 	{
 		case WQOPS_THREAD_KEVENT_RETURN:
-			// only the event manager thread services kevents
+			// only the event manager thread services the kevent workqueue
 			workq_kevent_manager_return(item, affinity);
 		case WQOPS_THREAD_WORKLOOP_RETURN:
+			// the workloop is the one the thread is bound to, whatever `item` points to
 			workloop_servicer_return(item, affinity);
 		case WQOPS_THREAD_RETURN:
 			// Signalizes that the thread has completed its job
@@ -481,8 +306,8 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 					// __simple_printf("Resuming thread %d\n", id);
 
 					thread->flags = flags;
-					thread->events = NULL;
-					thread->nevents = 0;
+					thread->prepare = NULL;
+					thread->context = NULL;
 
 					// Dequeue
 					TAILQ_REMOVE(&workq_parked_head, thread, entries);
