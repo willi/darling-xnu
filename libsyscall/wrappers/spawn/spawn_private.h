@@ -37,6 +37,7 @@ int     posix_spawnattr_setpcontrol_np(posix_spawnattr_t *, const int) __API_AVA
 
 int     posix_spawnattr_getprocesstype_np(const posix_spawnattr_t * __restrict, int * __restrict) __API_AVAILABLE(macos(10.8), ios(6.0));
 int     posix_spawnattr_setprocesstype_np(posix_spawnattr_t *, const int) __API_AVAILABLE(macos(10.8), ios(6.0));
+int     posix_spawnattr_setdataless_iopolicy_np(posix_spawnattr_t * __restrict attr, const int policy) __SPI_AVAILABLE(macos(13.3), ios(16.4), tvos(16.4), watchos(9.4));
 
 int     posix_spawnattr_setcpumonitor(posix_spawnattr_t * __restrict, uint64_t, uint64_t) __API_AVAILABLE(macos(10.8), ios(6.0));
 int     posix_spawnattr_getcpumonitor(posix_spawnattr_t * __restrict, uint64_t *, uint64_t *) __API_AVAILABLE(macos(10.8), ios(6.0));
