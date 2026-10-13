@@ -175,13 +175,10 @@ static char fakeuuid[16];
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 {
 #ifndef VARIANT_DYLD
-	char path[64], stat[1024];
-	char *statptr;
-	const char* elem;
-	unsigned long long starttime;
-	int32_t ppid;
-
 	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
+	uint64_t unique_id, parent_unique_id;
+	uint32_t pidversion;
+	int code;
 
 	if (bufsize < sizeof(*info))
 		return -ENOSPC;
@@ -191,54 +188,16 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 #warning Get UUID from kernel
 	memcpy(info->p_uuid, fakeuuid, sizeof(info->p_uuid));
 
-	//////////////////////////
-	// Read info for pid    //
-	//////////////////////////
+	// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers
+	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion);
+	if (code < 0)
+		return errno_linux_to_bsd(code);
 
-	__simple_sprintf(path, "/proc/%d/stat", pid);
-	if (!read_string(path, stat, sizeof(stat)))
-		return -ESRCH;
-
-	statptr = stat;
-	skip_stat_elems(&statptr, 3); // skip until ppid
-
-	elem = next_stat_elem(&statptr);
-	if (!elem)
-		return -EINVAL;
-
-	ppid = __simple_atoi(elem, NULL);
-
-	skip_stat_elems(&statptr, 17); // skip until starttime
-	elem = next_stat_elem(&statptr);
-
-	if (!elem)
-		return -EINVAL;
-
-	starttime = __simple_atoi(elem, NULL);
-	info->p_uniqueid = starttime << 16;
-	info->p_uniqueid |= (pid & 0xffff);
-
-	//////////////////////////
-	// Read info for ppid   //
-	//////////////////////////
-
-	__simple_sprintf(path, "/proc/%d/stat", ppid);
-	if (!read_string(path, stat, sizeof(stat)))
-		return -ESRCH;
-
-	statptr = stat;
-	skip_stat_elems(&statptr, 21); // skip until starttime
-	elem = next_stat_elem(&statptr);
-
-	if (!elem)
-		return -EINVAL;
-
-	starttime = __simple_atoi(elem, NULL);
-	info->p_puniqueid = starttime << 16;
-	info->p_puniqueid |= (ppid & 0xffff);
-
+	info->p_uniqueid = unique_id;
+	info->p_puniqueid = parent_unique_id;
+	info->p_idversion = pidversion;
 #endif
-	return 1;
+	return sizeof(struct proc_uniqidentifierinfo);
 }
 
 // glibc bits/confname.h
@@ -360,7 +319,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
 	}
 
 	// TODO: Other proc_threadinfo fields
-	return 1;
+	return sizeof(struct proc_threadinfo);
 }
 
 static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
@@ -437,7 +396,7 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
 	if (is_64_bit)
 		info->pbsi_flags |= P_LP64;
 
-	return 1;
+	return sizeof(struct proc_bsdshortinfo);
 reterr:
 	return -EINVAL;
 }

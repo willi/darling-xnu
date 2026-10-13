@@ -40,10 +40,14 @@ add_circular(system_kernel FAT
 		$<IF:$<BOOL:${BUILD_TARGET_64BIT}>,$<TARGET_OBJECTS:libsyscall_64>,>
 		$<TARGET_OBJECTS:libsyscall>
 		$<TARGET_OBJECTS:libsyscall_dynamic>
-		#$<TARGET_OBJECTS:kqueue>
+		# here rather than in libSystem, so that processes running Apple's libSystem (an iOS Simulator runtime) have
+		# kqueues too
+		$<TARGET_OBJECTS:kqueue>
 		$<TARGET_OBJECTS:emulation>
 	SIBLINGS
 		system_c
+		system_malloc
+		system_pthread
 		compiler_rt
 		system_dyld
 	DEPENDENCIES

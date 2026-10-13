@@ -49,7 +49,10 @@ struct epoll_event
 	epoll_data_t data;
 } __attribute__((packed));
 
+#define EPOLL_CLOEXEC 02000000
+
 extern int epoll_create (int __size) __THROW;
+extern int epoll_create1 (int __flags) __THROW;
 
 extern int epoll_ctl (int __epfd, int __op, int __fd,
 						struct epoll_event *__event) __THROW;

@@ -11,6 +11,7 @@
 #include <darling/emulation/common/simple.h>
 
 #include <darlingserver/rpc.h>
+#include <darling/emulation/common/libsystem.h>
 
 int pthread_obj_size;
 bsdthread_entry_t pthread_entry_point;
@@ -21,6 +22,9 @@ bsdwqthread_entry_t wqueue_entry_point;
 #define PTHREAD_FEATURE_QOS_DEFAULT 0x40000000
 #define WORKQ_FEATURE_FINEPRIO 0x02
 #define WORKQ_FEATURE_KEVENT 0x40
+#define WORKQ_FEATURE_WORKLOOP 0x80
+#define PTHREAD_FEATURE_BSDTHREADCTL 0x04
+#define PTHREAD_FEATURE_SETSELF 0x08
 
 struct _pthread_registration_data {
 	uint64_t version;
@@ -33,6 +37,35 @@ struct _pthread_registration_data {
 } __attribute__ ((packed));
 
 static struct _pthread_registration_data g_pth_regdata;
+
+// What bsdthread_register() tells libpthread (and through it, libdispatch) the kernel supports. The syscalls
+// behind every bit are always there, as a kernel's would be; the mask only decides which code paths the process's
+// own libraries take, so it depends on which libraries those are.
+static int workq_supported_features(void)
+{
+	// Darling's libpthread and libdispatch are built for none of these. Its libdispatch has
+	// DISPATCH_USE_KEVENT_WORKQUEUE and DISPATCH_USE_KEVENT_WORKLOOP off and runs without kernel QoS.
+	if (!__libkernel_has_apple_libsystem())
+		return 0;
+
+	// Apple's libSystem (an iOS Simulator runtime) requires them all:
+	return
+		// workqueue threads start in libpthread's _pthread_wqthread with new-SPI flags (workq_kernreturn.c)
+		PTHREAD_FEATURE_DISPATCHFUNC
+		// thread requests carry a pthread_priority_t, which is what workq_thread_flags() takes
+		| WORKQ_FEATURE_FINEPRIO
+		// libpthread sets thread QoS through bsdthread_ctl() instead of in userspace only
+		| PTHREAD_FEATURE_BSDTHREADCTL
+		// libpthread uses bsdthread_ctl(BSDTHREAD_CTL_SET_SELF) for QoS and vouchers
+		| PTHREAD_FEATURE_SETSELF
+		// QoS classes include MAINTENANCE, and the kernel has a default QoS
+		| PTHREAD_FEATURE_QOS_MAINTENANCE
+		| PTHREAD_FEATURE_QOS_DEFAULT
+		// kevent_qos(KEVENT_FLAG_WORKQ) and its event manager thread (kqueue/kevent_workq.c)
+		| WORKQ_FEATURE_KEVENT
+		// kevent_id() and EVFILT_WORKLOOP (kqueue/kevent_id.c)
+		| WORKQ_FEATURE_WORKLOOP;
+}
 
 long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		const struct _pthread_registration_data* pth_regdata,
@@ -49,8 +82,7 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		__simple_abort();
 	}
 
-	return /* WORKQ_FEATURE_KEVENT | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_QOS_MAINTENANCE 
-		| PTHREAD_FEATURE_DISPATCHFUNC | PTHREAD_FEATURE_QOS_DEFAULT */ 0;
+	return workq_supported_features();
 }
 
 // Before you make any changes to the assembly code, I strongly recommend looking at the `_thread_start`
@@ -153,16 +185,23 @@ void wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
 
 #if __x86_64__
 	__asm__ __volatile__ (
-		// `_start_wqthread` does not expect the stack to be aligned (using the 
-		// call instruction will add the return address to the stack, causing 
-		// it to be aligned).
+		// Start over at the top of the stack, where libpthread keeps the pthread_t, as XNU does
+		// whenever it hands a workqueue thread to `_start_wqthread`. A parked thread that is woken
+		// up, or the event manager going on to its next batch, is still deep inside the frames of its
+		// previous run; jumping from there would leak a little stack on every reuse until it overflows.
+		// `_start_wqthread` does not expect the stack to be aligned like a function's (using the
+		// call instruction would add the return address to the stack, causing it to be aligned).
+		"movq %[stack_top], %%rsp\n"
 		"jmpq *%[wqueue_entry_point]\n"
 		::
 		// Arguments follow the usual x86_64 calling conventions.
 		"r"(arg1),"r"(arg2),"r"(arg3),"r"(arg4),"r"(arg5),"r"(arg6),
+		[stack_top] "r"((uintptr_t)self & ~(uintptr_t)15),
 		[wqueue_entry_point] "r"(wqueue_entry_point)
 	);
 #elif __i386__
+	// FIXME: unlike x86_64, this doesn't reset the stack (all six argument registers are taken),
+	// so every reuse of a workqueue thread leaks a little stack.
 	__asm__ __volatile__ (
 		// `_start_wqthread` does not expect the stack to be aligned.
 		"jmpl *%[wqueue_entry_point]\n"
