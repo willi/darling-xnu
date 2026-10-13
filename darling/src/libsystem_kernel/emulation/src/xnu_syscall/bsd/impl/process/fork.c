@@ -9,12 +9,12 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/common/simple.h>
-#include <darling/emulation/common/libsystem.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 
 #include <darlingserver/rpc.h>
@@ -72,17 +72,18 @@ long sys_fork(void)
 		__dserver_close_process_lifetime_pipe(newReadFd);
 
 #ifndef VARIANT_DYLD
+		// None of the parent's workqueue threads or kqueues exist in the child. This runs before any libSystem
+		// fork handler, so before malloc is usable again: none of these may allocate or free memory.
+		workq_atfork_child();
 		workq_kevent_atfork_child();
-		// Darling's libSystem resets libkqueue in its atfork child handler
-		if (__libkernel_has_apple_libsystem())
-			kqueue_atfork();
+		workloop_atfork_child();
+		kqueue_atfork();
 #endif
 	}
 #ifndef VARIANT_DYLD
-	else if (__libkernel_has_apple_libsystem())
+	else if (ret > 0)
 	{
-		// Darling's libSystem waits for the child's darlingserver checkin in its atfork parent handler;
-		// Apple's libSystem has no such step
+		// wait for the child's darlingserver checkin
 		_mach_fork_parent();
 	}
 #endif
