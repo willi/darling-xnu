@@ -3,7 +3,11 @@
 #include <sys/socket.h>
 
 #include <darling/emulation/conversion/network/duct.h>
+#include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/duct_errno.h>
+#include <darling/emulation/conversion/network/getsockopt.h>
+#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
 
@@ -62,4 +66,31 @@ int sockaddr_fixup_from_linux(struct sockaddr_fixup* out, const void* linux_sock
 	}
 
 	return ret;
+}
+
+static int linux_socket_option(int fd, int optname, int* value)
+{
+	unsigned int len = sizeof(*value);
+
+#ifdef __NR_socketcall
+	return LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_GETSOCKOPT,
+			((long[6]) { fd, LINUX_SOL_SOCKET, optname, value, &len, 0 }));
+#else
+	return LINUX_SYSCALL(__NR_getsockopt, fd, LINUX_SOL_SOCKET, optname, value, &len);
+#endif
+}
+
+int local_dgram_send_flags(int fd, int linux_flags, int* local_dgram)
+{
+	int type, domain;
+
+	*local_dgram = linux_socket_option(fd, LINUX_SO_TYPE, &type) == 0 && type == LINUX_SOCK_DGRAM
+		&& linux_socket_option(fd, LINUX_SO_DOMAIN, &domain) == 0 && domain == LINUX_PF_LOCAL;
+
+	return *local_dgram ? (linux_flags | LINUX_MSG_DONTWAIT) : linux_flags;
+}
+
+long local_dgram_send_result(int local_dgram, long linux_ret)
+{
+	return (local_dgram && linux_ret == -LINUX_EAGAIN) ? -LINUX_ENOBUFS : linux_ret;
 }

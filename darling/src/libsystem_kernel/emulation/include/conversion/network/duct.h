@@ -6,6 +6,9 @@
 #define LINUX_PF_IPX	4
 #define LINUX_PF_INET6	10
 
+#define LINUX_SOCK_DGRAM	2
+#define LINUX_SO_DOMAIN		39
+
 #define LINUX_MSG_OOB             0x01
 #define LINUX_MSG_PEEK            0x02
 #define LINUX_MSG_DONTROUTE       0x04
