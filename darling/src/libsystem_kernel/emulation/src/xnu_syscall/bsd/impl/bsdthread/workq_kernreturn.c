@@ -178,35 +178,6 @@ static int workq_kevent_apply(const struct kevent_qos_s* changelist, int nchange
 	return rv;
 }
 
-// Restarts the event manager thread, or a workloop servicer, in `_pthread_wqthread` with `events`. Unlike the
-// reuse of parked workqueue threads, this starts over at the top of the thread's stack: these threads go on from
-// one batch to the next without parking, so they would otherwise run a little deeper on every batch.
-static void __attribute__((noreturn)) workq_kevent_thread_jump(dthread_t self, int thread_port,
-		void* stacklowaddr, struct kevent_qos_s* events, int flags, int nevents)
-{
-#if __x86_64__
-	register void* arg1 asm("rdi") = self;
-	register int   arg2 asm("esi") = thread_port;
-	register void* arg3 asm("rdx") = stacklowaddr;
-	register void* arg4 asm("rcx") = events;
-	register int   arg5 asm("r8d") = flags;
-	register int   arg6 asm("r9d") = nevents;
-
-	// libpthread keeps the pthread_t at the top of a workqueue thread's stack.
-	__asm__ __volatile__ (
-		"movq %[stack_top], %%rsp\n"
-		"jmpq *%[wqueue_entry_point]\n"
-		::
-		"r"(arg1),"r"(arg2),"r"(arg3),"r"(arg4),"r"(arg5),"r"(arg6),
-		[stack_top] "r"((uintptr_t)self & ~(uintptr_t)15),
-		[wqueue_entry_point] "r"(wqueue_entry_point)
-	);
-#else
-	wqueue_entry_point_asm_jump(self, thread_port, stacklowaddr, events, flags, nevents);
-#endif
-	__builtin_unreachable();
-}
-
 // Waits for the next batch of kevents and runs the event manager thread with it.
 static void __attribute__((noreturn)) workq_kevent_manager_wait(dthread_t self, int thread_port,
 		void* stacklowaddr, int flags)
@@ -235,7 +206,7 @@ static void __attribute__((noreturn)) workq_kevent_manager_wait(dthread_t self, 
 		}
 	}
 
-	workq_kevent_thread_jump(self, thread_port, stacklowaddr, workq_kevent_events, flags, nevents);
+	wqueue_entry_point_asm_jump(self, thread_port, stacklowaddr, workq_kevent_events, flags, nevents);
 }
 
 static void workq_kevent_manager_start(void* self, int thread_port, void* stacklowaddr,
@@ -357,7 +328,7 @@ void workq_workloop_thread_continue(struct kevent_qos_s* events, int nevents, un
 	dthread_t self = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
 	int thread_port = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF);
 
-	workq_kevent_thread_jump(self, thread_port, self->stackbottom, events,
+	wqueue_entry_point_asm_jump(self, thread_port, self->stackbottom, events,
 		workq_workloop_thread_flags(priority) | WQ_FLAG_THREAD_TSD_BASE_SET | WQ_FLAG_THREAD_REUSE, nevents);
 }
 

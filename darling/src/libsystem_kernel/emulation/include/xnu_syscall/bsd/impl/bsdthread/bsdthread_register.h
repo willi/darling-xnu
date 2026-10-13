@@ -19,7 +19,8 @@ void pthread_entry_point_wrapper(void* self, int thread_port, void* funptr,
 		void* funarg, unsigned long stacksize, unsigned int flags);
 void wqueue_entry_point_wrapper(void* self, int thread_port, void* stackaddr,
 		void* item, int reuse, int nevents);
-void wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
+// Enters `_start_wqthread` at the top of the calling workqueue thread's stack.
+void __attribute__((noreturn)) wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
 		void* item, int reuse, int nevents);
 
 #endif // BSDTHREAD_REGISTER_H

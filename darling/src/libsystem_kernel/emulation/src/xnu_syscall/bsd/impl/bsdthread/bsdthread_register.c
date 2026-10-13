@@ -165,16 +165,23 @@ void wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
 
 #if __x86_64__
 	__asm__ __volatile__ (
-		// `_start_wqthread` does not expect the stack to be aligned (using the 
-		// call instruction will add the return address to the stack, causing 
-		// it to be aligned).
+		// Start over at the top of the stack, where libpthread keeps the pthread_t, as XNU does
+		// whenever it hands a workqueue thread to `_start_wqthread`. A parked thread that is woken
+		// up, or the event manager going on to its next batch, is still deep inside the frames of its
+		// previous run; jumping from there would leak a little stack on every reuse until it overflows.
+		// `_start_wqthread` does not expect the stack to be aligned like a function's (using the
+		// call instruction would add the return address to the stack, causing it to be aligned).
+		"movq %[stack_top], %%rsp\n"
 		"jmpq *%[wqueue_entry_point]\n"
 		::
 		// Arguments follow the usual x86_64 calling conventions.
 		"r"(arg1),"r"(arg2),"r"(arg3),"r"(arg4),"r"(arg5),"r"(arg6),
+		[stack_top] "r"((uintptr_t)self & ~(uintptr_t)15),
 		[wqueue_entry_point] "r"(wqueue_entry_point)
 	);
 #elif __i386__
+	// FIXME: unlike x86_64, this doesn't reset the stack (all six argument registers are taken),
+	// so every reuse of a workqueue thread leaks a little stack.
 	__asm__ __volatile__ (
 		// `_start_wqthread` does not expect the stack to be aligned.
 		"jmpl *%[wqueue_entry_point]\n"
