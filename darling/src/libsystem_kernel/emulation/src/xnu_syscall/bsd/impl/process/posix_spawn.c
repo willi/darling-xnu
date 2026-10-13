@@ -52,6 +52,8 @@ extern int _mach_fork_child(void);
 // Darling can't reach into the new task like that, but a task created by fork or exec takes its inheritable special
 // ports (the bootstrap port among them) from the task it comes from. So the caller sets them on itself around the
 // fork or exec, and puts its own back once the child has them. The lock keeps two spawns from mixing their ports up.
+// Like XNU, this goes around task_set_special_port(), which refuses ports with immovable rights: launchd gives its jobs
+// bootstrap ports whose receive rights are immovable.
 // Other port action types are ignored, as before (the simulator doesn't support exception ports, for one).
 
 struct spawn_special_port
@@ -82,6 +84,13 @@ static int spawn_count_special_ports(const struct _posix_spawn_args_desc* desc)
 
 static void spawn_restore_special_ports(struct spawn_special_port* ports, int n);
 
+static kern_return_t spawn_set_special_port(int which, mach_port_t port)
+{
+	int code = dserver_rpc_spawn_set_special_port(which, port);
+
+	return (code < 0) ? KERN_FAILURE : code;
+}
+
 // Takes spawn_ports_lock, which spawn_restore_special_ports() releases (also when this fails).
 static int spawn_set_special_ports(const struct _posix_spawn_args_desc* desc, struct spawn_special_port* ports, int n)
 {
@@ -102,7 +111,7 @@ static int spawn_set_special_ports(const struct _posix_spawn_args_desc* desc, st
 		kr = task_get_special_port(mach_task_self(), act->which, &saved);
 		if (kr != KERN_SUCCESS)
 			break;
-		kr = task_set_special_port(mach_task_self(), act->which, act->new_port);
+		kr = spawn_set_special_port(act->which, act->new_port);
 		if (kr != KERN_SUCCESS)
 		{
 			if (saved != MACH_PORT_NULL)
@@ -123,7 +132,7 @@ static void spawn_restore_special_ports(struct spawn_special_port* ports, int n)
 {
 	while (n-- > 0)
 	{
-		task_set_special_port(mach_task_self(), ports[n].which, ports[n].saved);
+		spawn_set_special_port(ports[n].which, ports[n].saved);
 		if (ports[n].saved != MACH_PORT_NULL)
 			mach_port_deallocate(mach_task_self(), ports[n].saved);
 	}
