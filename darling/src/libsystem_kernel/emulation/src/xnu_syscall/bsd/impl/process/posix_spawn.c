@@ -37,6 +37,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/dirent/getdirentries.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/misc/fileport_makefd.h>
 
 #include <darlingserver/rpc.h>
 
@@ -139,6 +140,71 @@ static void spawn_restore_special_ports(struct spawn_special_port* ports, int n)
 	libsimple_lock_unlock(&spawn_ports_lock);
 }
 
+// A PSFA_FILEPORT_DUP2 names a fileport in the caller's space, which XNU turns into a descriptor while it runs the file
+// actions. A forked child here doesn't have the caller's ports, so the caller turns them into close-on-exec descriptors
+// before forking (fileport_fds, in file action order), and the child dups each one where the action asks.
+
+static int spawn_count_fileports(const struct _posix_spawn_args_desc* desc)
+{
+	int i, n = 0;
+
+	if (desc == NULL || desc->factp == NULL)
+		return 0;
+
+	for (i = 0; i < desc->factp->psfa_act_count; i++)
+	{
+		if (desc->factp->psfa_act_acts[i].psfaa_type == XNU_PSFA_FILEPORT_DUP2)
+			n++;
+	}
+	return n;
+}
+
+static void spawn_close_fileports(int* fds, int n)
+{
+	while (n-- > 0)
+		close_internal(fds[n]);
+}
+
+static int spawn_open_fileports(const struct _posix_spawn_args_desc* desc, int* fds, int n)
+{
+	int i, opened = 0;
+
+	for (i = 0; i < desc->factp->psfa_act_count && opened < n; i++)
+	{
+		const struct xnu__psfa_action* act = &desc->factp->psfa_act_acts[i];
+		int fd;
+
+		if (act->psfaa_type != XNU_PSFA_FILEPORT_DUP2)
+			continue;
+
+		fd = (act->psfaa_fileport == MACH_PORT_NULL) ? -EINVAL : sys_fileport_makefd(act->psfaa_fileport);
+		if (fd < 0)
+		{
+			spawn_close_fileports(fds, opened);
+			return -EINVAL; // as XNU fails a fileport that isn't one
+		}
+		sys_fcntl(fd, F_SETFD, FD_CLOEXEC);
+		fds[opened++] = fd;
+	}
+	return 0;
+}
+
+// the descriptor a file action replaces or closes
+static int spawn_action_target_fd(const struct xnu__psfa_action* act)
+{
+	switch (act->psfaa_type)
+	{
+		case XNU_PSFA_CLOSE:
+		case XNU_PSFA_OPEN:
+			return act->psfaa_filedes;
+		case XNU_PSFA_DUP2:
+		case XNU_PSFA_FILEPORT_DUP2:
+			return act->psfaa_dup2args.psfad_newfiledes;
+		default:
+			return -1;
+	}
+}
+
 long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_desc* desc,
 		char** argvp, char** envp)
 {
@@ -146,12 +212,25 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 	int pipe[2] = { -1, -1 };
 	int nports = spawn_count_special_ports(desc);
 	struct spawn_special_port* ports = __builtin_alloca(nports * sizeof(*ports));
+	int nfileports = spawn_count_fileports(desc);
+	int* fileport_fds = __builtin_alloca(nfileports * sizeof(*fileport_fds));
+	int next_fileport = 0;
+
+	if (nfileports > 0)
+	{
+		ret = spawn_open_fileports(desc, fileport_fds, nfileports);
+		if (ret < 0)
+			return ret;
+	}
 
 	if (nports > 0)
 	{
 		ret = spawn_set_special_ports(desc, ports, nports);
 		if (ret < 0)
+		{
+			spawn_close_fileports(fileport_fds, nfileports);
 			return ret;
+		}
 	}
 
 	if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
@@ -330,7 +409,7 @@ no_fork:
 
 				//__simple_kprintf("act count (on iter %d): %d\n", i, desc->factp->psfa_act_count);
 
-				if (act->psfaa_filedes == pipe[1] || (act->psfaa_type == XNU_PSFA_DUP2 && act->psfaa_dup2args.psfad_newfiledes == pipe[1]))
+				if (act->psfaa_filedes == pipe[1] || spawn_action_target_fd(act) == pipe[1])
 				{
 					ret = sys_dup(pipe[1]);
 					if (ret < 0)
@@ -338,6 +417,20 @@ no_fork:
 
 					close_internal(pipe[1]);
 					pipe[1] = ret;
+				}
+
+				// keep the descriptors of fileports that later actions still need out of this action's way
+				for (int j = next_fileport; j < nfileports; j++)
+				{
+					if (fileport_fds[j] != spawn_action_target_fd(act))
+						continue;
+
+					ret = sys_fcntl(fileport_fds[j], F_DUPFD_CLOEXEC, 0);
+					if (ret < 0)
+						goto fail;
+
+					close_internal(fileport_fds[j]);
+					fileport_fds[j] = ret;
 				}
 
 				switch (act->psfaa_type)
@@ -352,6 +445,12 @@ no_fork:
 					case XNU_PSFA_DUP2:
 						//__simple_kprintf("duping %d to %d\n", act->psfaa_filedes, act->psfaa_dup2args.psfad_newfiledes);
 						ret = sys_dup2(act->psfaa_filedes, act->psfaa_dup2args.psfad_newfiledes);
+						if (ret < 0)
+							goto fail;
+						break;
+
+					case XNU_PSFA_FILEPORT_DUP2:
+						ret = sys_dup2(fileport_fds[next_fileport++], act->psfaa_dup2args.psfad_newfiledes);
 						if (ret < 0)
 							goto fail;
 						break;
@@ -447,6 +546,7 @@ fail:
 		if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
 		{
 			// no_fork case
+			spawn_close_fileports(fileport_fds, nfileports);
 			if (nports > 0)
 				spawn_restore_special_ports(ports, nports);
 			ret = errno_linux_to_bsd(ret);
@@ -475,6 +575,8 @@ fail:
 			spawn_restore_special_ports(ports, nports);
 			nports = 0;
 		}
+		spawn_close_fileports(fileport_fds, nfileports);
+		nfileports = 0;
 
 		if (my_pid < 0)
 		{
@@ -493,5 +595,6 @@ fail:
 out:
 	if (nports > 0)
 		spawn_restore_special_ports(ports, nports);
+	spawn_close_fileports(fileport_fds, nfileports);
 	return ret;
 }
