@@ -23,7 +23,20 @@ extern _libkernel_functions_t _libkernel_functions;
 extern int _mach_fork_parent(void);
 extern void kqueue_atfork(void);
 
+libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
+
 long sys_fork(void)
+{
+	long ret;
+
+	libsimple_lock_lock(&fork_special_ports_lock);
+	ret = sys_fork_special_ports_locked();
+	// the child's copy came along locked
+	libsimple_lock_unlock(&fork_special_ports_lock);
+	return ret;
+}
+
+long sys_fork_special_ports_locked(void)
 {
 	int ret;
 	int wdfd = get_perthread_wd();

@@ -1,7 +1,10 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/fileport_makefd.h>
 
+#include <sys/fcntl.h>
+
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
 
 #include <darlingserver/rpc.h>
 
@@ -13,5 +16,7 @@ long sys_fileport_makefd(int port)
 	if (code < 0)
 		return errno_linux_to_bsd(code);
 
+	// as XNU's (the descriptor arrives without it)
+	sys_fcntl(fd, F_SETFD, FD_CLOEXEC);
 	return fd;
 }
