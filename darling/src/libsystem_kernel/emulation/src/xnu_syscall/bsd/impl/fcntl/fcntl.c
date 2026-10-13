@@ -80,6 +80,18 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 	{
 		case F_CHECK_LV:
 			return 0;
+		// Darling does not enforce code signatures: accept the file's signature as covering the whole file.
+		// dyld (and the iOS Simulator's dyld_sim) refuse to map an image whose signature does not reach its
+		// code signature blob, so F_ADDFILESIGS_RETURN reports the largest end offset.
+		case F_ADDFILESIGS:
+		case F_ADDFILESIGS_FOR_DYLD_SIM:
+		case F_ADDFILESIGS_RETURN:
+		{
+			fsignatures_t* sigs = (fsignatures_t*) arg;
+			if (cmd != F_ADDFILESIGS && sigs != NULL)
+				sigs->fs_file_start = 0x7fffffffffffffffLL;
+			return 0;
+		}
 		case F_SETFD:
 			if (arg & ~FD_CLOEXEC)
 				return -EINVAL;

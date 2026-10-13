@@ -77,6 +77,16 @@ typedef const struct _libkernel_functions {
 #endif
 } *_libkernel_functions_t;
 
+#ifdef DARLING
+/*
+ * Darling's libSystem passes version 4 with the Darling fields above. A newer version comes from Apple's own
+ * libSystem (an iOS Simulator runtime loaded through dyld_sim), whose version 5 puts malloc_type_malloc/free/realloc
+ * where Darling's fields would be: those must not be read.
+ */
+#define DARLING_LIBKERNEL_FUNCTIONS_VERSION 4
+#define _libkernel_has_darling_functions(fns) ((fns)->version == DARLING_LIBKERNEL_FUNCTIONS_VERSION)
+#endif
+
 typedef const struct _libkernel_string_functions {
 	/* The following functions are included in version 1 of this structure */
 	unsigned long version;

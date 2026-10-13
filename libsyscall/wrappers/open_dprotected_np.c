@@ -40,3 +40,32 @@ open_dprotected_np(const char *path, int flags, int class, int dpflags, ...)
 	}
 	return __open_dprotected_np(path, flags, class, dpflags, mode);
 }
+
+#ifdef DARLING
+#include <errno.h>
+
+/* XNU's value: authenticate against the file's own vnode rather than another fd */
+#define AUTH_OPEN_NOAUTHFD -1
+
+int openat(int fd, const char *path, int oflag, ...);
+
+/*
+ * Darling has no data protection classes and does not authenticate opens: check the arguments as XNU does, then
+ * open the file as openat() would.
+ */
+int
+openat_authenticated_np(int fd, const char *path, int flags, int authfd)
+{
+	if (flags & O_CREAT) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if ((authfd != AUTH_OPEN_NOAUTHFD) && (authfd < 0)) {
+		errno = EBADF;
+		return -1;
+	}
+
+	return openat(fd, path, flags);
+}
+#endif /* DARLING */

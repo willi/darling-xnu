@@ -199,6 +199,82 @@ mach_msg_size_t rcv_scatter_size;
 	return mr;
 }
 
+#ifdef DARLING
+/*
+ * XNU's mach_msg2() (macOS 13 / iOS 16), as binaries built against newer SDKs call it (an iOS Simulator runtime's
+ * libdispatch and IOKit), carried out with mach_msg_overwrite(). The header travels in the arguments. With
+ * MACH64_MSG_VECTOR, data is a message vector and an auxiliary data vector and the two sizes count vectors;
+ * darlingserver carries no auxiliary data, so outgoing aux data is dropped and a receive reports none.
+ */
+#define DARLING_MACH64_MSG_VECTOR 0x0000000100000000ull
+
+typedef struct {
+	mach_vm_address_t msgv_data;
+	mach_vm_address_t msgv_rcv_addr; /* if non-zero, the receive buffer */
+	mach_msg_size_t msgv_send_size;
+	mach_msg_size_t msgv_rcv_size;
+} darling_mach_msg_vector_t;
+
+typedef struct {
+	mach_msg_size_t msgdh_size;
+	uint32_t msgdh_reserved;
+} darling_mach_msg_aux_header_t;
+
+mach_msg_return_t
+mach_msg2_internal(void *data, uint64_t option64, uint64_t msgh_bits_and_send_size,
+    uint64_t msgh_remote_and_local_port, uint64_t msgh_voucher_and_id, uint64_t desc_count_and_rcv_name,
+    uint64_t rcv_size_and_priority, uint64_t timeout)
+{
+	mach_msg_option_t option = (mach_msg_option_t)(uint32_t)option64;
+	mach_msg_size_t send_size = (mach_msg_size_t)(msgh_bits_and_send_size >> 32);
+	mach_msg_size_t rcv_size = (mach_msg_size_t)rcv_size_and_priority;
+	mach_port_t rcv_name = (mach_port_t)(desc_count_and_rcv_name >> 32);
+	mach_msg_header_t *msg, *rcv_msg = NULL;
+	darling_mach_msg_aux_header_t *aux = NULL;
+	mach_port_t notify = MACH_PORT_NULL;
+	mach_msg_return_t mr;
+
+	if (option64 & DARLING_MACH64_MSG_VECTOR) {
+		darling_mach_msg_vector_t *vecs = data;
+		mach_msg_size_t rcv_count = rcv_size;
+
+		msg = (mach_msg_header_t *)vecs[0].msgv_data;
+		if (vecs[0].msgv_rcv_addr) {
+			rcv_msg = (mach_msg_header_t *)vecs[0].msgv_rcv_addr;
+		}
+		send_size = vecs[0].msgv_send_size;
+		rcv_size = vecs[0].msgv_rcv_size;
+		if (rcv_count > 1 && vecs[1].msgv_data && vecs[1].msgv_rcv_size >= sizeof(*aux)) {
+			aux = (darling_mach_msg_aux_header_t *)vecs[1].msgv_data;
+		}
+	} else {
+		msg = data;
+	}
+
+	if (option & MACH_SEND_MSG) {
+		msg->msgh_bits = (mach_msg_bits_t)msgh_bits_and_send_size;
+		msg->msgh_size = send_size;
+		msg->msgh_remote_port = (mach_port_t)msgh_remote_and_local_port;
+		msg->msgh_local_port = (mach_port_t)(msgh_remote_and_local_port >> 32);
+		msg->msgh_voucher_port = (mach_port_name_t)msgh_voucher_and_id;
+		msg->msgh_id = (mach_msg_id_t)(msgh_voucher_and_id >> 32);
+		/* mach_msg() passes its notify argument as the send priority */
+		notify = (mach_port_t)(rcv_size_and_priority >> 32);
+	} else if ((option & MACH_RCV_MSG) && (option & MACH_RCV_SYNC_WAIT)) {
+		/* a receive-only sync wait carries notify in the header's remote port */
+		notify = (mach_port_t)msgh_remote_and_local_port;
+	}
+
+	mr = mach_msg_overwrite(msg, option, send_size, rcv_size, rcv_name, (mach_msg_timeout_t)timeout, notify,
+	    rcv_msg, 0);
+
+	if (aux && (option & MACH_RCV_MSG) && mr == MACH_MSG_SUCCESS) {
+		aux->msgdh_size = 0;
+	}
+	return mr;
+}
+#endif /* DARLING */
+
 
 mach_msg_return_t
 mach_msg_send(mach_msg_header_t *msg)

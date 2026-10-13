@@ -37,6 +37,7 @@ set(LIBSYSCALL_MIGS
 	mach/host_priv
 	mach/host_security
 	mach/lock_set
+	mach/mach_eventlink
 	mach/mach_host
 	mach/mach_port
 	mach/mach_voucher
@@ -55,6 +56,10 @@ set(LIBSYSCALL_MIGS_INTERNAL
 	mach/thread_act
 	mach/vm_map
 )
+
+# Like Apple's Libsyscall.xcconfig (OTHER_MIGFLAGS = -novouchers): libsystem_kernel's MIG stubs must not call into
+# libdispatch's voucher_mach_msg_set, which itself makes MIG calls while initializing the task voucher
+set(MIG_EXTRA_FLAGS -novouchers)
 
 set(syscall_mig_sources "")
 set(syscall_mig_sources_32 "")
@@ -224,6 +229,7 @@ set(syscall_sources
 	wrappers/utimensat.c
 	wrappers/varargs_wrappers.S
 	wrappers/work_interval.c
+	wrappers/skywalk/os_channel_darling.c
 
 	# wrappers/cancelable/fcntl-base.c
 	wrappers/cancelable/fcntl.c
@@ -499,7 +505,9 @@ set(syscall_sources
 	bsdsyscalls/_mkdir.S
 	bsdsyscalls/___mkfifo_extended.S
 	bsdsyscalls/_mkfifo.S
+	bsdsyscalls/_mkfifoat.S
 	bsdsyscalls/_mknod.S
+	bsdsyscalls/_mknodat.S
 	bsdsyscalls/_mlockall.S
 	bsdsyscalls/_mlock.S
 	bsdsyscalls/___mmap.S

@@ -12,6 +12,12 @@ add_definitions(-DBSDTHREAD_WRAP_LINUX_PTHREAD
 	-DEMULATED_VERSION="Darwin Kernel Version 20.6.0"
 	-DEMULATED_OSVERSION="20G1120"
 	-DEMULATED_OSPRODUCTVERSION="11.7.4"
+	# Reported to processes running Apple's own libSystem (an iOS Simulator runtime), which refuses to start on a
+	# host older than its minimum; this is the macOS 15.6 kernel, a supported host for the iOS 26 runtimes
+	-DSIMULATOR_HOST_RELEASE="24.6.0"
+	-DSIMULATOR_HOST_VERSION="Darwin Kernel Version 24.6.0"
+	-DSIMULATOR_HOST_OSVERSION="24G84"
+	-DSIMULATOR_HOST_OSPRODUCTVERSION="15.6"
 )
 
 # include src/startup for rtsig.h
@@ -221,6 +227,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/impl/stat/mkdir.c
 	src/xnu_syscall/bsd/impl/stat/mkdirat.c
 	src/xnu_syscall/bsd/impl/stat/mkfifo.c
+	src/xnu_syscall/bsd/impl/stat/mkfifoat.c
 	src/xnu_syscall/bsd/impl/stat/rmdir.c
 	src/xnu_syscall/bsd/impl/stat/stat.c
 	src/xnu_syscall/bsd/impl/stat/stat64_extended.c
@@ -276,6 +283,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/impl/unistd/linkat.c
 	src/xnu_syscall/bsd/impl/unistd/lseek.c
 	src/xnu_syscall/bsd/impl/unistd/mknod.c
+	src/xnu_syscall/bsd/impl/unistd/mknodat.c
 	src/xnu_syscall/bsd/impl/unistd/pipe.c
 	src/xnu_syscall/bsd/impl/unistd/pread.c
 	src/xnu_syscall/bsd/impl/unistd/pwrite.c

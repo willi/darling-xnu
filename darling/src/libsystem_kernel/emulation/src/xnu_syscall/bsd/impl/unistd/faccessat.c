@@ -18,6 +18,9 @@ long sys_faccessat(int fd, const char* filename, int amode, int flag)
 	struct vchroot_expand_args vc;
 	int linux_flags;
 
+	if (!filename)
+		return -EFAULT;
+
 	vc.flags = (flag & BSD_AT_SYMLINK_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
 	vc.dfd = atfd(fd);
 

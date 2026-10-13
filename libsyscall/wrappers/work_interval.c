@@ -294,6 +294,11 @@ void work_interval_instance_free(work_interval_instance_t wii) {
     puts("STUB: work_interval_instance_free called");
 }
 
+// not in XNU's public sources; called by newer UIKit and libdispatch (work_interval_instance_alloc returns NULL here)
+void work_interval_instance_set_complexity(work_interval_instance_t wii, uint8_t complexity) {
+    puts("STUB: work_interval_instance_set_complexity called");
+}
+
 void work_interval_instance_set_deadline(work_interval_instance_t wii, uint64_t deadline) {
     puts("STUB: work_interval_instance_set_deadline called");
 }

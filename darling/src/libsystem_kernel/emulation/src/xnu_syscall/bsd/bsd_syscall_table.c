@@ -112,6 +112,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/stat/mkdir.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/stat/mkdirat.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/stat/mkfifo.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/stat/mkfifoat.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/stat/rmdir.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/stat/stat.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/stat/stat64_extended.h>
@@ -167,6 +168,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/linkat.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/lseek.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/mknod.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/unistd/mknodat.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/pipe.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/pread.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/pwrite.h>
@@ -486,4 +488,6 @@ void* __bsd_syscall_table[600] = {
 	[517] = sys_fclonefileat,
 	[521] = sys_abort_with_payload,
 	[524] = sys_setattrlistat,
+	[553] = sys_mkfifoat,
+	[554] = sys_mknodat,
 };
