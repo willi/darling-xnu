@@ -22,6 +22,7 @@ bsdwqthread_entry_t wqueue_entry_point;
 #define PTHREAD_FEATURE_QOS_DEFAULT 0x40000000
 #define WORKQ_FEATURE_FINEPRIO 0x02
 #define WORKQ_FEATURE_KEVENT 0x40
+#define WORKQ_FEATURE_WORKLOOP 0x80
 #define PTHREAD_FEATURE_BSDTHREADCTL 0x04
 #define PTHREAD_FEATURE_SETSELF 0x08
 
@@ -52,12 +53,13 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		__simple_abort();
 	}
 
-	// Darling's libdispatch runs without kernel QoS or kevent workqueues. Apple's libdispatch (an iOS Simulator
-	// runtime) requires both; the kevent workqueue is emulated in workq_kernreturn.c.
+	// Darling's libdispatch runs without kernel QoS, kevent workqueues or workloops. Apple's libdispatch (an iOS
+	// Simulator runtime) requires all three; the kevent workqueue is emulated in workq_kernreturn.c and workloops
+	// in kevent_id.c.
 	if (__libkernel_has_apple_libsystem())
 		return PTHREAD_FEATURE_DISPATCHFUNC | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_BSDTHREADCTL
 			| PTHREAD_FEATURE_SETSELF | PTHREAD_FEATURE_QOS_MAINTENANCE | WORKQ_FEATURE_KEVENT
-			| PTHREAD_FEATURE_QOS_DEFAULT;
+			| WORKQ_FEATURE_WORKLOOP | PTHREAD_FEATURE_QOS_DEFAULT;
 
 	return /* WORKQ_FEATURE_KEVENT | WORKQ_FEATURE_FINEPRIO | PTHREAD_FEATURE_QOS_MAINTENANCE 
 		| PTHREAD_FEATURE_DISPATCHFUNC | PTHREAD_FEATURE_QOS_DEFAULT */ 0;

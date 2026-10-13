@@ -146,6 +146,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/impl/kqueue/kevent.c
 	src/xnu_syscall/bsd/impl/kqueue/kevent64.c
 	src/xnu_syscall/bsd/impl/kqueue/kevent_qos.c
+	src/xnu_syscall/bsd/impl/kqueue/kevent_id.c
 	src/xnu_syscall/bsd/impl/kqueue/kqueue.c
 	src/xnu_syscall/bsd/impl/misc/abort_with_payload.c
 	src/xnu_syscall/bsd/impl/misc/clonefile.c

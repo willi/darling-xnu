@@ -238,7 +238,7 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 	info->p_puniqueid |= (ppid & 0xffff);
 
 #endif
-	return 1;
+	return sizeof(struct proc_uniqidentifierinfo);
 }
 
 // glibc bits/confname.h
@@ -360,7 +360,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
 	}
 
 	// TODO: Other proc_threadinfo fields
-	return 1;
+	return sizeof(struct proc_threadinfo);
 }
 
 static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
@@ -437,7 +437,7 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
 	if (is_64_bit)
 		info->pbsi_flags |= P_LP64;
 
-	return 1;
+	return sizeof(struct proc_bsdshortinfo);
 reterr:
 	return -EINVAL;
 }
