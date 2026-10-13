@@ -15,6 +15,8 @@ kern_return_t thread_get_special_reply_port_impl(void);
 mach_port_name_t thread_self_trap_impl(void);
 
 kern_return_t mach_generate_activity_id_impl(mach_port_name_t task, int i, uint64_t* id);
+kern_return_t host_create_mach_voucher_impl(mach_port_name_t host, mach_voucher_attr_raw_recipe_array_t recipes, int recipes_size, mach_port_name_t* voucher);
+kern_return_t mach_voucher_extract_attr_recipe_impl(mach_port_name_t voucher_name, mach_voucher_attr_key_t key, mach_voucher_attr_raw_recipe_t recipe, mach_msg_type_number_t* recipe_size);
 mach_msg_return_t mach_msg_overwrite_trap_impl(mach_msg_header_t *msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size, mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify, mach_msg_header_t *rcv_msg, mach_msg_size_t rcv_limit);
 mach_msg_return_t mach_msg_trap_impl(mach_msg_header_t *msg, mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size, mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify);
 mach_port_name_t mach_reply_port_impl(void);

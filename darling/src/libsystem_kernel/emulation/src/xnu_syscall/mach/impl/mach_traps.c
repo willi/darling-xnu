@@ -772,6 +772,32 @@ kern_return_t mach_generate_activity_id_impl(mach_port_name_t task, int i, uint6
 	return code;
 }
 
+kern_return_t host_create_mach_voucher_impl(mach_port_name_t host, mach_voucher_attr_raw_recipe_array_t recipes,
+				int recipes_size, mach_port_name_t* voucher)
+{
+	int code = dserver_rpc_host_create_mach_voucher(host, recipes, recipes_size, voucher);
+
+	if (code < 0) {
+		__simple_printf("host_create_mach_voucher failed (internally): %d\n", code);
+		__simple_abort();
+	}
+
+	return code;
+}
+
+kern_return_t mach_voucher_extract_attr_recipe_impl(mach_port_name_t voucher_name, mach_voucher_attr_key_t key,
+				mach_voucher_attr_raw_recipe_t recipe, mach_msg_type_number_t* recipe_size)
+{
+	int code = dserver_rpc_mach_voucher_extract_attr_recipe(voucher_name, key, recipe, recipe_size);
+
+	if (code < 0) {
+		__simple_printf("mach_voucher_extract_attr_recipe failed (internally): %d\n", code);
+		__simple_abort();
+	}
+
+	return code;
+}
+
 mach_port_name_t mk_timer_create_impl(void)
 {
 	unsigned int port_name;
