@@ -9,6 +9,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/common/libsystem.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
@@ -17,6 +18,7 @@
 #include <darlingserver/rpc.h>
 
 extern _libkernel_functions_t _libkernel_functions;
+extern int _mach_fork_parent(void);
 
 long sys_fork(void)
 {
@@ -66,6 +68,14 @@ long sys_fork(void)
 
 		__dserver_close_process_lifetime_pipe(newReadFd);
 	}
+#ifndef VARIANT_DYLD
+	else if (__libkernel_has_apple_libsystem())
+	{
+		// Darling's libSystem waits for the child's darlingserver checkin in its atfork parent handler;
+		// Apple's libSystem has no such step
+		_mach_fork_parent();
+	}
+#endif
 
 	return ret;
 }

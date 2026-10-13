@@ -1,7 +1,7 @@
 #include <darling/emulation/linux_premigration/ext/file_handle.h>
 
 #include <sys/errno.h>
-#include <os/lock.h>
+#include <libsimple/lock.h>
 
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/fcntl/open.h>
@@ -27,10 +27,7 @@ struct SavedRef
 #define MOUNT_ID_SAVED (-100)
 static struct SavedRef g_savedRefs[200];
 static int g_nextSavedRef = 0, g_nextGen = 0;
-static os_unfair_lock g_savedRefLock = OS_UNFAIR_LOCK_INIT;
-
-void __attribute__((weak)) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
-void __attribute__((weak)) os_unfair_lock_lock(os_unfair_lock_t lock) {}
+static libsimple_lock_t g_savedRefLock = LIBSIMPLE_LOCK_INITIALIZER;
 
 VISIBLE
 int sys_name_to_handle(const char* name, RefData* ref, int follow)
@@ -53,7 +50,7 @@ int sys_name_to_handle(const char* name, RefData* ref, int follow)
 	// This is unfortunately the case for overlayfs, which doesn't support "nfs_export" along with "metacopy"
 	if (ret == -LINUX_EOPNOTSUPP && sys_access(name, 0) == 0)
 	{
-		os_unfair_lock_lock(&g_savedRefLock);
+		libsimple_lock_lock(&g_savedRefLock);
 
 		if (g_savedRefs[g_nextSavedRef].path)
 			free(g_savedRefs[g_nextSavedRef].path);
@@ -66,7 +63,7 @@ int sys_name_to_handle(const char* name, RefData* ref, int follow)
 
 		g_nextSavedRef = (g_nextSavedRef + 1) % (sizeof(g_savedRefs) / sizeof(g_savedRefs[0]));
 
-		os_unfair_lock_unlock(&g_savedRefLock);
+		libsimple_lock_unlock(&g_savedRefLock);
 
 		ret = 0;
 	}
@@ -83,7 +80,7 @@ int sys_handle_to_name(RefData* ref, char name[4096])
 	if (ref->mount_id == MOUNT_ID_SAVED)
 	{
 		int ret = -ENOENT;
-		os_unfair_lock_lock(&g_savedRefLock);
+		libsimple_lock_lock(&g_savedRefLock);
 
 		if (g_savedRefs[ref->index].gen == ref->gen)
 		{
@@ -91,7 +88,7 @@ int sys_handle_to_name(RefData* ref, char name[4096])
 			ret = sys_access(name, 0);
 		}
 
-		os_unfair_lock_unlock(&g_savedRefLock);
+		libsimple_lock_unlock(&g_savedRefLock);
 		return ret;
 	}
 

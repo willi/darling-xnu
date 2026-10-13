@@ -583,7 +583,16 @@
 #define	SYS_pwritev_nocancel 543
 #define	SYS_ulock_wait2    544
 #define	SYS_proc_info_extended_id 545
-#define	SYS_MAXSYSCALL	546
+			/* 546  */
+			/* 547  */
+			/* 548  */
+			/* 549  */
+			/* 550  */
+			/* 551  */
+			/* 552  */
+#define	SYS_mkfifoat       553
+#define	SYS_mknodat        554
+#define	SYS_MAXSYSCALL	555
 #define	SYS_invalid	63
 
 #endif /* __APPLE_API_PRIVATE */

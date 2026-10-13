@@ -69,13 +69,27 @@ typedef const struct _libkernel_functions {
 	int (*pthread_current_stack_contains_np)(const void *, size_t);
 
 	/* Subsequent versions must only add pointers! */
+} *_libkernel_functions_t;
+
 #ifdef DARLING
+/*
+ * Darling's own libSystem registers these through __libkernel_darling_init() before it calls __libkernel_init().
+ * Apple's libSystem (an iOS Simulator runtime loaded through dyld_sim) does not know about them, so
+ * _libkernel_functions keeps Apple's layout and "were these registered" tells the two libSystems apart.
+ */
+typedef const struct _libkernel_darling_functions {
+	unsigned long version;
 	int (*dyld_func_lookup)(const char*,void**);
 	void (*posix_spawn_prepare)(void);
 	void (*posix_spawn_parent)(void);
 	void (*posix_spawn_child)(void);
+} *_libkernel_darling_functions_t;
+
+void __libkernel_darling_init(_libkernel_darling_functions_t fns);
+
+// NULL in dyld and in processes running Apple's libSystem
+extern _libkernel_darling_functions_t _libkernel_darling_functions;
 #endif
-} *_libkernel_functions_t;
 
 typedef const struct _libkernel_string_functions {
 	/* The following functions are included in version 1 of this structure */

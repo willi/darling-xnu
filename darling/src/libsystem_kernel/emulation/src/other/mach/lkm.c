@@ -32,27 +32,40 @@ static bool use_per_thread_driver_fd = false;
 
 extern void _xtrace_postfork_child(void);
 
+static void elfcalls_from_apple(const char** applep)
+{
+	if (applep == NULL)
+		return;
+	for (int i = 0; applep[i] != NULL; i++)
+	{
+		if (strncmp(applep[i], "elf_calls=", 10) == 0)
+		{
+			uintptr_t table = (uintptr_t) __simple_atoi16(applep[i] + 10, NULL);
+			_elfcalls = (struct elf_calls*) table;
+		}
+	}
+}
+
 void mach_driver_init(const char** applep)
 {
 #ifdef VARIANT_DYLD
-	if (applep != NULL)
-	{
-		int i;
-		for (i = 0; applep[i] != NULL; i++)
-		{
-			if (strncmp(applep[i], "elf_calls=", 10) == 0)
-			{
-				uintptr_t table = (uintptr_t) __simple_atoi16(applep[i] + 10, NULL);
-				_elfcalls = (struct elf_calls*) table;
-			}
+	elfcalls_from_apple(applep);
+#else
+	if (_libkernel_darling_functions) {
+		// ask for elfcalls already set up by dyld
+		void* (*p2)(void);
+		_libkernel_darling_functions->dyld_func_lookup("__dyld_get_elfcalls", (void**)&p2);
+
+		_elfcalls = p2();
+	} else {
+		// Apple's libSystem (an iOS Simulator runtime under dyld_sim) has no dyld_func_lookup; mldr's
+		// "elf_calls=" apple string reaches it unchanged
+		elfcalls_from_apple(applep);
+		if (_elfcalls == NULL) {
+			__simple_printf("libsystem_kernel: no elf_calls from Darling's libSystem or mldr\n");
+			__simple_abort();
 		}
 	}
-#else
-	// ask for elfcalls already set up by dyld
-	void* (*p2)(void);
-	_libkernel_functions->dyld_func_lookup("__dyld_get_elfcalls", (void**)&p2);
-
-	_elfcalls = p2();
 
 	if (applep) {
 		// this is not a fork; guard the main thread's RPC FD we get from mldr
@@ -137,22 +150,23 @@ uint64_t mach_absolute_time(void)
 	return out;
 }
 
+#ifdef VARIANT_DYLD
+// dyld has no libdispatch to provide vouchers. Everywhere else, voucher_mach_msg_* come from libsyscall's
+// _libc_funcptr.c, which forwards to the functions libdispatch registers through __libkernel_voucher_init.
 VISIBLE
 boolean_t voucher_mach_msg_set(mach_msg_header_t *msg)
 {
-	// UNIMPLEMENTED_TRAP();
 	return 0;
 }
 
 VISIBLE
 void voucher_mach_msg_revert(voucher_mach_msg_state_t state)
 {
-	// UNIMPLEMENTED_TRAP();
 }
 
 VISIBLE
 voucher_mach_msg_state_t voucher_mach_msg_adopt(mach_msg_header_t *msg)
 {
-	// UNIMPLEMENTED_TRAP();
 	return NULL;
 }
+#endif
