@@ -60,6 +60,9 @@ set(LIBSYSCALL_MIGS_INTERNAL
 # Like Apple's Libsyscall.xcconfig (OTHER_MIGFLAGS = -novouchers): libsystem_kernel's MIG stubs must not call into
 # libdispatch's voucher_mach_msg_set, which itself makes MIG calls while initializing the task voucher
 set(MIG_EXTRA_FLAGS -novouchers)
+if (NOT MIG_SUPPORTS_EXTRA_FLAGS)
+	message(FATAL_ERROR "cmake/mig.cmake does not pass MIG_EXTRA_FLAGS; libsystem_kernel needs -novouchers")
+endif()
 
 set(syscall_mig_sources "")
 set(syscall_mig_sources_32 "")

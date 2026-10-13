@@ -46,29 +46,25 @@ static void elfcalls_from_apple(const char** applep)
 	}
 }
 
-static bool has_apple_libsystem;
-
-bool mach_driver_has_apple_libsystem(void)
-{
-	return has_apple_libsystem;
-}
-
 void mach_driver_init(const char** applep)
 {
 #ifdef VARIANT_DYLD
 	elfcalls_from_apple(applep);
 #else
-	if (_libkernel_has_darling_functions(_libkernel_functions)) {
+	if (_libkernel_darling_functions) {
 		// ask for elfcalls already set up by dyld
 		void* (*p2)(void);
-		_libkernel_functions->dyld_func_lookup("__dyld_get_elfcalls", (void**)&p2);
+		_libkernel_darling_functions->dyld_func_lookup("__dyld_get_elfcalls", (void**)&p2);
 
 		_elfcalls = p2();
-	} else if (applep) {
+	} else {
 		// Apple's libSystem (an iOS Simulator runtime under dyld_sim) has no dyld_func_lookup; mldr's
 		// "elf_calls=" apple string reaches it unchanged
-		has_apple_libsystem = true;
 		elfcalls_from_apple(applep);
+		if (_elfcalls == NULL) {
+			__simple_printf("libsystem_kernel: no elf_calls from Darling's libSystem or mldr\n");
+			__simple_abort();
+		}
 	}
 
 	if (applep) {

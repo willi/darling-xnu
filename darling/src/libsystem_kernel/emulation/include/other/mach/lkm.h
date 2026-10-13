@@ -1,7 +1,6 @@
 #ifndef _LKM_H
 #define _LKM_H
 
-#include <stdbool.h>
 #include <os/tsd.h>
 
 #define DARLING_MACH_API_BASE		0x1000
@@ -92,8 +91,6 @@ enum { NR_get_api_version = DARLING_MACH_API_BASE,
 #define DARLING_MACH_API_COUNT (DARLING_MACH_API_ALMOST_COUNT - DARLING_MACH_API_BASE)
 
 void mach_driver_init(const char** applep);
-// Whether this process runs Apple's own libSystem (an iOS Simulator runtime under dyld_sim) rather than Darling's
-bool mach_driver_has_apple_libsystem(void);
 int lkm_call(int call_nr, void* arg);
 int lkm_call_raw(int call_nr, void* arg); // w/o errno translation
 int mach_driver_get_fd(void);

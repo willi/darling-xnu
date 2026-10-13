@@ -122,5 +122,7 @@ os_channel_set_slot_properties(const channel_ring_t ring, const channel_slot_t s
 int
 os_channel_sync(const channel_t channel, const sync_mode_t mode)
 {
-	return ENOTSUP;
+	// a syscall wrapper in XNU: -1 with errno
+	errno = ENOTSUP;
+	return -1;
 }

@@ -17,7 +17,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
-#include <darling/emulation/other/mach/lkm.h>
+#include <darling/emulation/common/libsystem.h>
 
 #include <darling-config.h>
 
@@ -173,7 +173,7 @@ sysctl_handler(handle_ostype)
 
 sysctl_handler(handle_osrelease)
 {
-	const char* s = mach_driver_has_apple_libsystem() ? SIMULATOR_HOST_RELEASE : EMULATED_RELEASE;
+	const char* s = __libkernel_has_apple_libsystem() ? SIMULATOR_HOST_RELEASE : EMULATED_RELEASE;
 
 	copyout_string(s, (char*) old, oldlen);
 	return 0;
@@ -181,7 +181,7 @@ sysctl_handler(handle_osrelease)
 
 sysctl_handler(handle_version)
 {
-	const char* s = mach_driver_has_apple_libsystem() ? SIMULATOR_HOST_VERSION : EMULATED_VERSION;
+	const char* s = __libkernel_has_apple_libsystem() ? SIMULATOR_HOST_VERSION : EMULATED_VERSION;
 
 	copyout_string(s, (char*) old, oldlen);
 	return 0;
@@ -189,7 +189,7 @@ sysctl_handler(handle_version)
 
 sysctl_handler(handle_osversion)
 {
-	const char* s = mach_driver_has_apple_libsystem() ? SIMULATOR_HOST_OSVERSION : EMULATED_OSVERSION;
+	const char* s = __libkernel_has_apple_libsystem() ? SIMULATOR_HOST_OSVERSION : EMULATED_OSVERSION;
 
 	copyout_string(s, (char*) old, oldlen);
 	return 0;
@@ -328,7 +328,7 @@ sysctl_handler(handle_usrstack64)
 }
 
 static sysctl_handler(handle_osproductversion) {
-	copyout_string(mach_driver_has_apple_libsystem() ? SIMULATOR_HOST_OSPRODUCTVERSION : EMULATED_OSPRODUCTVERSION,
+	copyout_string(__libkernel_has_apple_libsystem() ? SIMULATOR_HOST_OSPRODUCTVERSION : EMULATED_OSPRODUCTVERSION,
 			(char*)old, oldlen);
 	return 0;
 };

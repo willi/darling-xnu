@@ -69,22 +69,26 @@ typedef const struct _libkernel_functions {
 	int (*pthread_current_stack_contains_np)(const void *, size_t);
 
 	/* Subsequent versions must only add pointers! */
-#ifdef DARLING
-	int (*dyld_func_lookup)(const char*,void**);
-	void (*posix_spawn_prepare)(void);
-	void (*posix_spawn_parent)(void);
-	void (*posix_spawn_child)(void);
-#endif
 } *_libkernel_functions_t;
 
 #ifdef DARLING
 /*
- * Darling's libSystem passes version 4 with the Darling fields above. A newer version comes from Apple's own
- * libSystem (an iOS Simulator runtime loaded through dyld_sim), whose version 5 puts malloc_type_malloc/free/realloc
- * where Darling's fields would be: those must not be read.
+ * Darling's own libSystem registers these through __libkernel_darling_init() before it calls __libkernel_init().
+ * Apple's libSystem (an iOS Simulator runtime loaded through dyld_sim) does not know about them, so
+ * _libkernel_functions keeps Apple's layout and "were these registered" tells the two libSystems apart.
  */
-#define DARLING_LIBKERNEL_FUNCTIONS_VERSION 4
-#define _libkernel_has_darling_functions(fns) ((fns)->version == DARLING_LIBKERNEL_FUNCTIONS_VERSION)
+typedef const struct _libkernel_darling_functions {
+	unsigned long version;
+	int (*dyld_func_lookup)(const char*,void**);
+	void (*posix_spawn_prepare)(void);
+	void (*posix_spawn_parent)(void);
+	void (*posix_spawn_child)(void);
+} *_libkernel_darling_functions_t;
+
+void __libkernel_darling_init(_libkernel_darling_functions_t fns);
+
+// NULL in dyld and in processes running Apple's libSystem
+extern _libkernel_darling_functions_t _libkernel_darling_functions;
 #endif
 
 typedef const struct _libkernel_string_functions {

@@ -6,5 +6,6 @@
 
 long sys_mkfifoat(int fd, const char* path, unsigned int mode)
 {
-	return sys_mknodat(fd, path, mode | LINUX_S_IFIFO, 0);
+	// like XNU: only the permission bits of mode are used
+	return sys_mknodat(fd, path, (mode & 07777) | LINUX_S_IFIFO, 0);
 }
