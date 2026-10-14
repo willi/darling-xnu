@@ -33,6 +33,8 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
 
 #include <darlingserver/rpc.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
+#include <mach-o/loader.h>
 
 #define LINUX_PR_SET_NAME 15
 
@@ -192,23 +194,30 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 	}
 }
 
-static char fakeuuid[16];
-
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 {
 #ifndef VARIANT_DYLD
 	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
 	uint64_t unique_id, parent_unique_id;
 	uint32_t pidversion;
-	int code;
+	int code, fd;
 
 	if (bufsize < sizeof(*info))
 		return -ENOSPC;
 
 	memset(buffer, 0, bufsize);
 
-#warning Get UUID from kernel
-	memcpy(info->p_uuid, fakeuuid, sizeof(info->p_uuid));
+	// the executable's LC_UUID, as XNU records it at exec (logd keys the process's log strings by it)
+	fd = executable_open(pid);
+	if (fd >= 0)
+	{
+		struct uuid_command uc;
+		uint64_t base;
+
+		if (executable_find_load_command(fd, LC_UUID, &uc, sizeof(uc), &base) == 1)
+			memcpy(info->p_uuid, uc.uuid, sizeof(info->p_uuid));
+		close_internal(fd);
+	}
 
 	// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers
 	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion);

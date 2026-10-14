@@ -25,6 +25,7 @@ enum {
 	_KERN_MSGBUF = 1000,
 	_KERN_OSPRODUCTVERSION,
 	_KERN_BOOTARGS,
+	_KERN_BOOTSESSIONUUID,
 
 	_KERN_SEMMNS = 1000,
 };
@@ -49,6 +50,7 @@ static sysctl_handler(handle_sysv_semmns);
 static sysctl_handler(handle_osproductversion);
 static sysctl_handler(handle_osrevision);
 static sysctl_handler(handle_bootargs);
+static sysctl_handler(handle_bootsessionuuid);
 
 extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
 extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
@@ -80,6 +82,7 @@ const struct known_sysctl sysctls_kern[] = {
 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
 	{ .oid = _KERN_BOOTARGS, .type = CTLTYPE_STRING, .exttype = "S", .name = "bootargs", .handler = handle_bootargs },
+	{ .oid = _KERN_BOOTSESSIONUUID, .type = CTLTYPE_STRING, .exttype = "S", .name = "bootsessionuuid", .handler = handle_bootsessionuuid },
 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
 	{ .oid = -1 }
 };
@@ -178,6 +181,31 @@ sysctl_handler(handle_ostype)
 sysctl_handler(handle_bootargs)
 {
 	copyout_string("", (char*) old, oldlen);
+	return 0;
+}
+
+// The UUID XNU makes at each boot, which libtrace (os_log) won't run without: Linux's boot ID, in XNU's upper case.
+sysctl_handler(handle_bootsessionuuid)
+{
+	char uuid[37];
+	int fd, rd, i;
+
+	fd = sys_open("/proc/sys/kernel/random/boot_id", BSD_O_RDONLY, 0);
+	if (fd < 0)
+		return fd;
+	rd = sys_read(fd, uuid, sizeof(uuid) - 1);
+	close_internal(fd);
+	if (rd < (int) sizeof(uuid) - 1)
+		return -ENOENT;
+
+	uuid[sizeof(uuid) - 1] = '\0';
+	for (i = 0; uuid[i]; i++)
+	{
+		if (uuid[i] >= 'a' && uuid[i] <= 'f')
+			uuid[i] -= 'a' - 'A';
+	}
+
+	copyout_string(uuid, (char*) old, oldlen);
 	return 0;
 }
 
