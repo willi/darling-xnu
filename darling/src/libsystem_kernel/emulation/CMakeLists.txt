@@ -105,6 +105,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/ioctl/filio.c
 	src/xnu_syscall/bsd/helper/ioctl/socket.c
 	src/xnu_syscall/bsd/helper/misc/common_at.c
+	src/xnu_syscall/bsd/helper/misc/executable.c
 	src/xnu_syscall/bsd/helper/misc/readline.c
 	src/xnu_syscall/bsd/helper/misc/fdpath.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_hw.c

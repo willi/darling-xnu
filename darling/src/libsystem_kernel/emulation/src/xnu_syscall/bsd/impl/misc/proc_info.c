@@ -192,14 +192,13 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 	}
 }
 
-static char fakeuuid[16];
-
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 {
 #ifndef VARIANT_DYLD
 	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
 	uint64_t unique_id, parent_unique_id;
 	uint32_t pidversion;
+	uint64_t uuid[2];
 	int code;
 
 	if (bufsize < sizeof(*info))
@@ -207,14 +206,13 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 
 	memset(buffer, 0, bufsize);
 
-#warning Get UUID from kernel
-	memcpy(info->p_uuid, fakeuuid, sizeof(info->p_uuid));
-
-	// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers
-	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion);
+	// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers; the UUID is
+	// the executable's LC_UUID, recorded at exec (logd files the process's format strings under it)
+	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
 	if (code < 0)
 		return errno_linux_to_bsd(code);
 
+	memcpy(info->p_uuid, uuid, sizeof(info->p_uuid));
 	info->p_uniqueid = unique_id;
 	info->p_puniqueid = parent_unique_id;
 	info->p_idversion = pidversion;
