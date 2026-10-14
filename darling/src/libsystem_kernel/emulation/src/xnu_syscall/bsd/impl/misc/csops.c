@@ -12,12 +12,16 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
+#include <darlingserver/rpc.h>
 
 #ifndef CS_OPS_DER_ENTITLEMENTS_BLOB
 #define CS_OPS_DER_ENTITLEMENTS_BLOB 16
 #endif
 #ifndef CSSLOT_DER_ENTITLEMENTS
 #define CSSLOT_DER_ENTITLEMENTS 7
+#endif
+#ifndef CSMAGIC_EMBEDDED_DER_ENTITLEMENTS
+#define CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172
 #endif
 
 // Finds the blob in the given slot of an executable's embedded code signature: its offset in the file and its length,
@@ -27,7 +31,7 @@ static long find_signature_blob(int fd, uint32_t slot, uint64_t* out_offset, uin
 	struct linkedit_data_command lc;
 	uint32_t superblob[3], index[2], blob[2];
 	uint64_t base, signature;
-	uint32_t i, count;
+	uint32_t i, count, length;
 	long ret;
 
 	*out_length = 0;
@@ -42,7 +46,11 @@ static long find_signature_blob(int fd, uint32_t slot, uint64_t* out_offset, uin
 		return ret;
 	if (__builtin_bswap32(superblob[0]) != CSMAGIC_EMBEDDED_SIGNATURE)
 		return 0;
+	// the superblob, with all its index entries, must lie within the signature
+	length = __builtin_bswap32(superblob[1]);
 	count = __builtin_bswap32(superblob[2]);
+	if (length < sizeof(superblob) || length > lc.datasize || count > (length - sizeof(superblob)) / sizeof(index))
+		return -LINUX_ENOEXEC;
 	for (i = 0; i < count; i++)
 	{
 		if ((ret = executable_read(fd, index, sizeof(index), signature + sizeof(superblob) + (uint64_t) i * sizeof(index))) < 0)
@@ -55,7 +63,11 @@ static long find_signature_blob(int fd, uint32_t slot, uint64_t* out_offset, uin
 		if ((ret = executable_read(fd, blob, sizeof(blob), *out_offset)) < 0)
 			return ret;
 		*out_length = __builtin_bswap32(blob[1]);
-		return *out_length < sizeof(blob) ? -LINUX_ENOEXEC : 0;
+		if (*out_length < sizeof(blob) || (uint64_t) __builtin_bswap32(index[1]) + *out_length > lc.datasize)
+			return -LINUX_ENOEXEC;
+		if (__builtin_bswap32(blob[0]) != (slot == CSSLOT_ENTITLEMENTS ? CSMAGIC_EMBEDDED_ENTITLEMENTS : CSMAGIC_EMBEDDED_DER_ENTITLEMENTS))
+			return -LINUX_ENOEXEC;
+		return 0;
 	}
 	return 0;
 }
@@ -126,8 +138,20 @@ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
 	return ret;
 }
 
-// also more or less a stub
 long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token) {
-	// just defer to the regular csops
+	uint64_t unique_id, parent_unique_id, uuid[2];
+	uint32_t pidversion;
+	int code;
+
+	if (audit_token == NULL)
+		return -EINVAL;
+
+	// as XNU checks: the token must be for the process the pid names now, not one that died and left its pid to another
+	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
+	if (code < 0)
+		return errno_linux_to_bsd(code);
+	if (code > 0 || audit_token->val[5] != (unsigned int) pid || audit_token->val[7] != pidversion)
+		return -ESRCH;
+
 	return sys_csops(pid, ops, useraddr, usersize);
 }

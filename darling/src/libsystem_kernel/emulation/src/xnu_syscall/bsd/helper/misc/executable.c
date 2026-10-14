@@ -74,18 +74,20 @@ long executable_find_load_command(int fd, uint32_t cmd, void* out, size_t size, 
 	if (header.magic != MH_MAGIC_64)
 		return 0;
 
+	// the load commands must stay within sizeofcmds, as the kernel requires at exec
 	offset = base + sizeof(header);
 	for (i = 0; i < header.ncmds; i++, offset += lc.cmdsize)
 	{
 		if ((ret = executable_read(fd, &lc, sizeof(lc), offset)) < 0)
 			return ret;
-		if (lc.cmdsize < sizeof(lc))
+		if (lc.cmdsize < sizeof(lc) || offset + lc.cmdsize > base + sizeof(header) + header.sizeofcmds)
 			return -LINUX_ENOEXEC;
 		if (lc.cmd != cmd)
 			continue;
 
-		if (size > lc.cmdsize)
-			size = lc.cmdsize;
+		// a command too short for its structure is malformed
+		if (lc.cmdsize < size)
+			return -LINUX_ENOEXEC;
 		if ((ret = executable_read(fd, out, size, offset)) < 0)
 			return ret;
 		*out_base = base;
