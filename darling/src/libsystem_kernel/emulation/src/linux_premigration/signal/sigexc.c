@@ -13,6 +13,7 @@
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
+#include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/common/simple.h>
 
 #include <darlingserver/rpc.h>
@@ -318,6 +319,9 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 	}
 
 	linux_signum = signum_bsd_to_linux(bsd_signum);
+
+	// whatever the signal's disposition, as XNU does
+	signal_knotes_post(bsd_signum);
 
 	if (sig_handlers[linux_signum] != SIG_IGN)
 	{
