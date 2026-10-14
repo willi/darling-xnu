@@ -16,6 +16,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
+#include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 
 #include <darlingserver/rpc.h>
 
@@ -51,6 +52,12 @@ long sys_fork_special_ports_locked(void)
 	else if (ret == 0)
 	{
 		// in the child
+
+#ifndef VARIANT_DYLD
+		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
+		// take: a signal meanwhile would write to it
+		signal_knotes_atfork_child();
+#endif
 
 		// the old RPC FD will be closed in `guard_table_postfork_child`;
 		// we don't need to close it ourselves.

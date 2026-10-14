@@ -22,6 +22,8 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/readlink.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getuid.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getgid.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
@@ -35,6 +37,7 @@
 #define LINUX_PR_SET_NAME 15
 
 static long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize);
+static long _proc_terminate(int32_t pid);
 
 extern __SIZE_TYPE__ strlen(const char *s);
 extern void *memset(void *s, int c, __SIZE_TYPE__ n);
@@ -78,6 +81,8 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
 			else
 				return 0; // PROC_SELFSET_PCONTROL (1)
 		}
+		case 7: // proc_terminate
+			return _proc_terminate(pid);
 		case 8: // dirtycontrol
 			return 0;
 		case 2: // proc_pidinfo
@@ -89,6 +94,23 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
 					callnum);
 			return -ENOTSUP;
 	}
+}
+
+// XNU's proc_terminate(), which launchd uses to stop a job: signals another process and returns the signal. XNU sends
+// SIGKILL to a process whose dirty tracking says it is clean, but Darling doesn't track that (see dirtycontrol), so it
+// sends SIGTERM, as XNU does for a process that doesn't track it.
+static long _proc_terminate(int32_t pid)
+{
+	long ret;
+
+	if (pid <= 0)
+		return -EINVAL;
+	// not allowed to sudden terminate yourself
+	if (pid == sys_getpid())
+		return -EPERM;
+
+	ret = sys_kill(pid, SIGTERM, 1);
+	return (ret < 0) ? ret : SIGTERM;
 }
 
 static bool parse_smaps_firstline(

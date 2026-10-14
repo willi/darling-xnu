@@ -13,6 +13,8 @@
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
+#include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/common/simple.h>
 
 #include <darlingserver/rpc.h>
@@ -138,7 +140,7 @@ void sigexc_setup(void)
 		}
 		if (tracer != 0) {
 			kern_printf("sigexc: already traced -> SIGTRAP\n");
-			sys_kill(0, SIGTRAP, 0);
+			sys_kill(sys_getpid(), SIGTRAP, 0);
 		}
 	}
 #else
@@ -280,7 +282,11 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 
 
 	if (linux_signum == LINUX_SIGCONT)
+	{
+		// XNU records it too
+		signal_knotes_post(signum_linux_to_bsd(linux_signum));
 		goto out;
+	}
 
 	int bsd_signum = signum_linux_to_bsd(linux_signum);
 	if (bsd_signum <= 0)
@@ -319,6 +325,9 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 
 	linux_signum = signum_bsd_to_linux(bsd_signum);
 
+	// whatever the signal's disposition, as XNU does
+	signal_knotes_post(bsd_signum);
+
 	if (sig_handlers[linux_signum] != SIG_IGN)
 	{
 		if (sig_handlers[linux_signum])
@@ -342,7 +351,7 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 			if (bsd_signum == SIGTSTP || bsd_signum == SIGSTOP)
 			{
 				kern_printf("sigexc: emulating SIGTSTP/SIGSTOP\n");
-				LINUX_SYSCALL(__NR_kill, 0, LINUX_SIGSTOP);
+				LINUX_SYSCALL(__NR_kill, LINUX_SYSCALL0(__NR_getpid), LINUX_SIGSTOP);
 			}
 			else
 			{
@@ -358,8 +367,8 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 						&sa, NULL,
 						sizeof(sa.sa_mask));
 
-				// Resend signal to self
-				LINUX_SYSCALL(__NR_kill, 0, linux_signum);
+				// Resend signal to self (not to the process group, as kill(0, ...) would)
+				LINUX_SYSCALL(__NR_kill, LINUX_SYSCALL0(__NR_getpid), linux_signum);
 			}
 		}
 	}
