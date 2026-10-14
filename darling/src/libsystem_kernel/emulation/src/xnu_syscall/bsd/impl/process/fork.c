@@ -53,6 +53,12 @@ long sys_fork_special_ports_locked(void)
 	{
 		// in the child
 
+#ifndef VARIANT_DYLD
+		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
+		// take: a signal meanwhile would write to it
+		signal_knotes_atfork_child();
+#endif
+
 		// the old RPC FD will be closed in `guard_table_postfork_child`;
 		// we don't need to close it ourselves.
 		// that should also take care of closing descriptors for any other threads.
@@ -92,7 +98,6 @@ long sys_fork_special_ports_locked(void)
 		workq_kevent_atfork_child();
 		workloop_atfork_child();
 		kqueue_atfork();
-		signal_knotes_atfork_child();
 #endif
 	}
 #ifndef VARIANT_DYLD

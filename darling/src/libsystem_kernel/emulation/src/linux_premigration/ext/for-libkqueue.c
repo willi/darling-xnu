@@ -2,6 +2,7 @@
 
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 
 #include <darlingserver/rpc.h>
 
@@ -21,4 +22,17 @@ int _dup_4libkqueue(int fd) {
 		ret = errno_linux_to_bsd(ret);
 
 	return ret;
+};
+
+int _signal_knote_open_4libkqueue(int signum) {
+	int ret = signal_knote_open(signum);
+
+	if (ret < 0)
+		ret = errno_linux_to_bsd(ret);
+
+	return ret;
+};
+
+void _signal_knote_close_4libkqueue(int fd) {
+	signal_knote_close(fd);
 };

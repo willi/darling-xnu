@@ -174,8 +174,7 @@ long sys_sigaction(int signum, const struct bsd___sigaction* nsa, struct bsd_sig
 }
 #endif
 
-// SIGCHLD and SIGTTOU with a handler (sigexc_handler takes the others). EVFILT_SIGNAL knotes don't see SIGCHLD and
-// SIGTTOU at their default disposition, which XNU records too.
+// SIGCHLD and SIGTTOU with a handler (sigexc_handler takes the others); see signal_knotes.h for what knotes miss.
 static void handler_linux_to_bsd_wrapper(int linux_signum, struct linux_siginfo* info, void* ctxt) {
 	dserver_rpc_interrupt_enter();
 	signal_knotes_post(signum_linux_to_bsd(linux_signum));

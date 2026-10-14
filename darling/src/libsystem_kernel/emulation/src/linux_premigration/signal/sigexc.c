@@ -282,7 +282,11 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 
 
 	if (linux_signum == LINUX_SIGCONT)
+	{
+		// XNU records it too
+		signal_knotes_post(signum_linux_to_bsd(linux_signum));
 		goto out;
+	}
 
 	int bsd_signum = signum_linux_to_bsd(linux_signum);
 	if (bsd_signum <= 0)

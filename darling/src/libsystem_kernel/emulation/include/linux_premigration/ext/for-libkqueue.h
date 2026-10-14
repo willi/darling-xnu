@@ -14,4 +14,12 @@ int _dserver_rpc_kqchan_proc_open_4libkqueue(int32_t pid, uint32_t flags, int* o
 VISIBLE
 int _dup_4libkqueue(int fd);
 
+// EVFILT_SIGNAL (see signal_knotes.h): an eventfd that counts deliveries of the BSD signal signum, or a negative BSD
+// errno. Only _signal_knote_close_4libkqueue closes it.
+VISIBLE
+int _signal_knote_open_4libkqueue(int signum);
+
+VISIBLE
+void _signal_knote_close_4libkqueue(int fd);
+
 #endif // _DARLING_EMULATION_FOR_LIBKQUEUE_H_
