@@ -11,6 +11,10 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
+#include <darling/emulation/conversion/stat/common.h>
+
+#define XNU_F_GETPROTECTIONCLASS 63
+#define XNU_F_SETPROTECTIONCLASS 64
 
 #ifndef O_NOFOLLOW
 #   define O_NOFOLLOW 0x0100
@@ -91,6 +95,17 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 			if (cmd != F_ADDFILESIGS && sigs != NULL)
 				sigs->fs_file_start = 0x7fffffffffffffffLL;
 			return 0;
+		}
+		// Data protection classes: Linux file systems have none, so do what XNU does on a volume without content
+		// protection: setting a class is accepted and has no effect, and there's no class to get.
+		case XNU_F_GETPROTECTIONCLASS:
+		case XNU_F_SETPROTECTIONCLASS:
+		{
+			struct linux_stat st;
+			ret = LINUX_SYSCALL(__NR_fstat, fd, &st);
+			if (ret < 0)
+				return errno_linux_to_bsd(ret);
+			return cmd == XNU_F_SETPROTECTIONCLASS ? 0 : -ENOTSUP;
 		}
 		case F_SETFD:
 			if (arg & ~FD_CLOEXEC)

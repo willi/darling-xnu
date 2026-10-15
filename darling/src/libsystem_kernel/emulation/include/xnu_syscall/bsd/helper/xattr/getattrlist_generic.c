@@ -12,11 +12,12 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 
 #define ATTR_BIT_MAP_COUNT 5
 
-#define COMMON_SUPPORTED (ATTR_CMN_FNDRINFO | ATTR_CMN_OBJTAG)
-#define VOLUME_SUPPORTED 0
+#define COMMON_SUPPORTED (ATTR_CMN_FNDRINFO | ATTR_CMN_OBJTAG | ATTR_CMN_FULLPATH | ATTR_CMN_RETURNED_ATTRS)
+#define VOLUME_SUPPORTED (ATTR_VOL_INFO | ATTR_VOL_CAPABILITIES)
 #define DIR_SUPPORTED (ATTR_DIR_ENTRYCOUNT)
 #define FILE_SUPPORTED (ATTR_FILE_RSRCLENGTH)
 #define FORK_SUPPORTED 0
@@ -24,6 +25,28 @@
 #define ATTR_CMN_FNDRINFO 0x4000
 #define ATTR_FILE_RSRCLENGTH 0x1000
 #define ATTR_CMN_OBJTAG 0x00000010
+#define ATTR_CMN_FULLPATH 0x08000000
+#define ATTR_CMN_RETURNED_ATTRS 0x80000000
+#define ATTR_VOL_CAPABILITIES 0x00020000
+#define ATTR_VOL_INFO 0x80000000
+
+// vol_capabilities_attr_t: what a Linux file system (under Darling) can do, reported as XNU would for it
+#define VOL_CAP_FMT_SYMBOLICLINKS 0x00000002
+#define VOL_CAP_FMT_HARDLINKS 0x00000004
+#define VOL_CAP_FMT_SPARSE_FILES 0x00000040
+#define VOL_CAP_FMT_CASE_SENSITIVE 0x00000100
+#define VOL_CAP_FMT_CASE_PRESERVING 0x00000200
+#define VOL_CAP_FMT_FAST_STATFS 0x00000400
+#define VOL_CAP_FMT_2TB_FILESIZE 0x00000800
+#define VOL_CAP_FMT_64BIT_OBJECT_IDS 0x00020000
+#define VOL_CAP_INT_ATTRLIST 0x00000002
+#define VOL_CAP_INT_ADVLOCK 0x00000100
+#define VOL_CAP_INT_FLOCK 0x00000200
+#define VOL_CAP_INT_EXTENDED_ATTR 0x00004000
+#define VOL_CAP_INT_RENAME_SWAP 0x00040000
+#define VOL_CAP_INT_RENAME_EXCL 0x00080000
+#define VOL_CAPABILITIES_FORMAT_KNOWN 0x03ffffff
+#define VOL_CAPABILITIES_INTERFACES_KNOWN 0x003fffff
 #define ATTR_DIR_ENTRYCOUNT 0x00000002
 
 #define XATTR_FINDER_INFO "com.apple.FinderInfo"
@@ -31,6 +54,10 @@
 
 #define FSOPT_NOFOLLOW 1
 #define FSOPT_REPORT_FULLSIZE 4
+#define FSOPT_ATTR_CMN_EXTENDED 0x20
+
+#define LINUX_O_PATH 010000000
+#define XNU_MAXPATHLEN 1024
 
 #define VT_HFS 16
 
@@ -39,6 +66,7 @@
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern void *memset(void *s, int c, __SIZE_TYPE__ n);
 extern char *strcpy(char *dest, const char *src);
+extern __SIZE_TYPE__ strlen(const char *s);
 
 long
 FUNC_NAME(int fd,
@@ -50,7 +78,9 @@ const char* path,
 struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options)
 {
 	int rv;
-	char *ourBuffer, *next;
+	char *ourBuffer, *next, *variable;
+	char fullpath[XNU_MAXPATHLEN];
+	__SIZE_TYPE__ fullpathSize = 0;
 	__SIZE_TYPE__ spaceNeeded = 4; // 4 bytes for the length header
 
 	if (!alist)
@@ -84,18 +114,68 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 		return -EINVAL;
 	if ((alist->forkattr & FORK_SUPPORTED) != alist->forkattr)
 		return -EINVAL;
+	// as XNU: volume attributes only with ATTR_VOL_INFO, and then no attributes of the object but what was returned
+	if (alist->volattr && (!(alist->volattr & ATTR_VOL_INFO) || (alist->commonattr & ~ATTR_CMN_RETURNED_ATTRS) ||
+			alist->dirattr || alist->fileattr || alist->forkattr))
+		return -EINVAL;
 
-	if (alist->commonattr & ATTR_CMN_FNDRINFO)
-		spaceNeeded += 32;
-	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
-		spaceNeeded += 8; // off_t
+	if (alist->commonattr & ATTR_CMN_FULLPATH)
+	{
+		// the path as the process sees it (inside the prefix), with every symlink resolved: what F_GETPATH returns
+#if HAS_PATH
+		int path_fd = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path,
+				LINUX_O_PATH | LINUX_O_CLOEXEC | ((options & FSOPT_NOFOLLOW) ? LINUX_O_NOFOLLOW : 0), 0);
+		if (path_fd < 0)
+			return errno_linux_to_bsd(path_fd);
+		rv = fdpath(path_fd, fullpath, sizeof(fullpath));
+		close_internal(path_fd);
+#else
+		rv = fdpath(fd, fullpath, sizeof(fullpath));
+#endif
+		if (rv < 0)
+			return errno_linux_to_bsd(rv);
+		fullpathSize = strlen(fullpath) + 1;
+	}
+
+	// the fixed-size attributes, in the order of their bits in each group (common, volume, dir, file) as XNU packs
+	// them, but with the returned attributes first; then the variable-size data the attrreference_t's point to, each
+	// padded to 4 bytes
+	if (alist->commonattr & ATTR_CMN_RETURNED_ATTRS)
+		spaceNeeded += 5 * sizeof(uint32_t); // attribute_set_t
 	if (alist->commonattr & ATTR_CMN_OBJTAG)
 		spaceNeeded += sizeof(uint32_t); // fsobj_tag_t
+	if (alist->commonattr & ATTR_CMN_FNDRINFO)
+		spaceNeeded += 32;
+	if (alist->commonattr & ATTR_CMN_FULLPATH)
+		spaceNeeded += 8 + ((fullpathSize + 3) & ~3); // attrreference_t, then the path
+	if (alist->volattr & ATTR_VOL_CAPABILITIES)
+		spaceNeeded += 8 * sizeof(uint32_t); // vol_capabilities_attr_t
 	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT)
 		spaceNeeded += sizeof(uint32_t);
+	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
+		spaceNeeded += 8; // off_t
 
 	ourBuffer = (char*) __builtin_alloca(spaceNeeded);
+	memset(ourBuffer, 0, spaceNeeded);
 	next = ourBuffer + 4;
+	variable = ourBuffer + spaceNeeded - ((fullpathSize + 3) & ~3);
+
+	if (alist->commonattr & ATTR_CMN_RETURNED_ATTRS)
+	{
+		// everything asked for is returned
+		((uint32_t*) next)[0] = alist->commonattr;
+		((uint32_t*) next)[1] = alist->volattr & ~ATTR_VOL_INFO;
+		((uint32_t*) next)[2] = alist->dirattr;
+		((uint32_t*) next)[3] = alist->fileattr;
+		((uint32_t*) next)[4] = alist->forkattr;
+		next += 5 * sizeof(uint32_t);
+	}
+
+	if (alist->commonattr & ATTR_CMN_OBJTAG) {
+		// pretend we're always on HFS
+		*((uint32_t*)next) = VT_HFS;
+		next += 4;
+	}
 
 	if (alist->commonattr & ATTR_CMN_FNDRINFO)
 	{
@@ -108,24 +188,27 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 			memset(next, 0, 32);
 		next += 32;
 	}
-	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
+	if (alist->commonattr & ATTR_CMN_FULLPATH)
 	{
-#if HAS_PATH
-		rv = LINUX_SYSCALL(__NR_getxattr, vc.path, XATTR_FINDER_INFO, NULL, 0);
-#else
-		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, NULL, 0);
-#endif
-		if (rv < 0)
-			*((uint32_t*) next) = 0;
-		else
-			*((uint32_t*) next) = rv;
-		next += 4;
+		// attrreference_t: the data's offset from the attrreference_t itself, and its length (with the NUL)
+		((int32_t*) next)[0] = variable - next;
+		((uint32_t*) next)[1] = fullpathSize;
+		memcpy(variable, fullpath, fullpathSize);
+		next += 8;
 	}
 
-	if (alist->commonattr & ATTR_CMN_OBJTAG) {
-		// pretend we're always on HFS
-		*((uint32_t*)next) = VT_HFS;
-		next += 4;
+	if (alist->volattr & ATTR_VOL_CAPABILITIES)
+	{
+		uint32_t* caps = (uint32_t*) next;
+		caps[0] = VOL_CAP_FMT_SYMBOLICLINKS | VOL_CAP_FMT_HARDLINKS | VOL_CAP_FMT_SPARSE_FILES | VOL_CAP_FMT_CASE_SENSITIVE |
+			VOL_CAP_FMT_CASE_PRESERVING | VOL_CAP_FMT_FAST_STATFS | VOL_CAP_FMT_2TB_FILESIZE | VOL_CAP_FMT_64BIT_OBJECT_IDS;
+		caps[1] = VOL_CAP_INT_ATTRLIST | VOL_CAP_INT_ADVLOCK | VOL_CAP_INT_FLOCK | VOL_CAP_INT_EXTENDED_ATTR |
+			VOL_CAP_INT_RENAME_SWAP | VOL_CAP_INT_RENAME_EXCL;
+		caps[2] = caps[3] = 0; // reserved
+		caps[4] = VOL_CAPABILITIES_FORMAT_KNOWN;
+		caps[5] = VOL_CAPABILITIES_INTERFACES_KNOWN;
+		caps[6] = caps[7] = 0;
+		next += 8 * sizeof(uint32_t);
 	}
 
 	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT) {
@@ -168,6 +251,17 @@ attr_dir_entrycount_out:
 		close_internal(tmp_fd);
 attr_dir_entrycount_out_no_fd:
 		next += 4;
+	}
+
+	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
+	{
+#if HAS_PATH
+		rv = LINUX_SYSCALL(__NR_getxattr, vc.path, XATTR_FINDER_INFO, NULL, 0);
+#else
+		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, NULL, 0);
+#endif
+		*((int64_t*) next) = rv < 0 ? 0 : rv; // off_t
+		next += 8;
 	}
 
 	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < spaceNeeded)
