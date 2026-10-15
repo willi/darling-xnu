@@ -492,6 +492,7 @@ void* __bsd_syscall_table[600] = {
 	[517] = sys_fclonefileat,
 	[521] = sys_abort_with_payload,
 	[524] = sys_setattrlistat,
+	[530] = sys_kqueue_workloop_ctl,
 	[553] = sys_mkfifoat,
 	[554] = sys_mknodat,
 };

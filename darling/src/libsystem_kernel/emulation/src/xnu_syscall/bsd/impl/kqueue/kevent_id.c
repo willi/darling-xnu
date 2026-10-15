@@ -8,6 +8,8 @@
 
 #define __PTHREAD_EXPOSE_INTERNALS__ 1
 #include <pthread/priority_private.h>
+#include <pthread/workqueue_syscalls.h>
+#include <mach/policy.h>
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/common/simple.h>
@@ -92,6 +94,7 @@ struct workloop
 	uint32_t owner; // port name of the owning thread without its low 2 bits, or 0
 	uint32_t servicer; // same for the servicer thread, once it runs
 	bool serviced; // a servicer was requested, or is running
+	bool created; // made by KQ_WORKLOOP_CREATE, which holds a reference until KQ_WORKLOOP_DESTROY
 
 	int kq; // ordinary knotes; -1 until there is one
 	bool kq_armed; // the poller reports `kq` becoming readable
@@ -130,8 +133,15 @@ static struct workloop** wl_bucket(uint64_t id)
 	return &workloops[((id >> 4) ^ (id >> 12)) % WORKLOOP_BUCKETS];
 }
 
-// Returns the workloop with `id` with a reference, creating it if `create`.
-static struct workloop* wl_get(uint64_t id, bool create)
+enum wl_get_mode
+{
+	WL_EXISTING, // NULL if there is none
+	WL_CREATE, // created if there is none
+	WL_NEW, // created; NULL if there already is one
+};
+
+// Returns the workloop with `id` with a reference, as `mode` says.
+static struct workloop* wl_get(uint64_t id, enum wl_get_mode mode)
 {
 	struct workloop* wl;
 
@@ -143,7 +153,13 @@ static struct workloop* wl_get(uint64_t id, bool create)
 			break;
 	}
 
-	if (wl == NULL && create)
+	if (wl != NULL && mode == WL_NEW)
+	{
+		libsimple_lock_unlock(&workloops_lock);
+		return NULL;
+	}
+
+	if (wl == NULL && mode != WL_EXISTING)
 	{
 		wl = calloc(1, sizeof(*wl));
 		if (wl != NULL)
@@ -357,7 +373,7 @@ static bool wl_servicer_prepare(void* context, struct workq_batch* batch)
 static void wl_kq_fired(uint64_t id)
 {
 	// the workloop may be gone, or even have been replaced by another with the same id; that only costs a poll
-	struct workloop* wl = wl_get(id, false);
+	struct workloop* wl = wl_get(id, WL_EXISTING);
 	bool start_servicer = false;
 
 	if (wl == NULL)
@@ -700,7 +716,7 @@ long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchan
 	if (!(flags & KEVENT_FLAG_WORKLOOP) || nchanges < 0 || nevents < 0)
 		return -EINVAL;
 
-	wl = wl_get(id, !(flags & KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST));
+	wl = wl_get(id, (flags & KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST) ? WL_EXISTING : WL_CREATE);
 	if (wl == NULL)
 		return (flags & KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST) ? -ENOENT : -ENOMEM;
 
@@ -787,10 +803,78 @@ void workloop_atfork_child(void)
 		LINUX_SYSCALL1(__NR_close, poller_fd);
 	poller_fd = -1;
 }
+
+// libdispatch creates workloops with scheduling parameters (BaseBoard's fixed-priority ones, say) this way; without it,
+// it drains them on a pthread root queue instead, where their timer sources crash (backboardd). Darling's servicer
+// threads can't take the parameters, so they're only checked, as XNU does.
+long sys_kqueue_workloop_ctl(uint64_t cmd, uint64_t options, const void* addr, unsigned long sz)
+{
+	struct kqueue_workloop_params params = { 0 };
+	struct workloop* wl;
+	bool created;
+
+	if (sz < sizeof(params.kqwlp_version))
+		return -EINVAL;
+	__builtin_memcpy(&params, addr, sz < sizeof(params) ? sz : sizeof(params));
+	if (params.kqwlp_version != (int) sz)
+		return -EINVAL;
+
+	switch (cmd)
+	{
+		case KQ_WORKLOOP_CREATE:
+			if (!params.kqwlp_flags)
+				return -EINVAL;
+			if ((params.kqwlp_flags & KQ_WORKLOOP_CREATE_SCHED_PRI)
+				&& (params.kqwlp_sched_pri < 1 || params.kqwlp_sched_pri > 63 /* MAXPRI_USER */))
+				return -EINVAL;
+			if ((params.kqwlp_flags & KQ_WORKLOOP_CREATE_SCHED_POL)
+				&& params.kqwlp_sched_pol != POLICY_TIMESHARE && params.kqwlp_sched_pol != POLICY_RR
+				&& params.kqwlp_sched_pol != POLICY_FIFO)
+				return -EINVAL;
+			if ((params.kqwlp_flags & KQ_WORKLOOP_CREATE_CPU_PERCENT)
+				&& (params.kqwlp_cpu_percent <= 0 || params.kqwlp_cpu_percent > 100
+					|| params.kqwlp_cpu_refillms <= 0 || params.kqwlp_cpu_refillms > 0x00ffffff))
+				return -EINVAL;
+
+			wl = wl_get(params.kqwlp_id, WL_NEW);
+			if (wl == NULL)
+				return -EEXIST; // (or out of memory, which XNU would panic on)
+
+			// keep wl_get()'s reference for KQ_WORKLOOP_DESTROY
+			libsimple_lock_lock(&wl->lock);
+			wl->created = true;
+			libsimple_lock_unlock(&wl->lock);
+			return 0;
+
+		case KQ_WORKLOOP_DESTROY:
+			wl = wl_get(params.kqwlp_id, WL_EXISTING);
+			if (wl == NULL)
+				return -ENOENT;
+
+			libsimple_lock_lock(&wl->lock);
+			created = wl->created;
+			wl->created = false;
+			libsimple_lock_unlock(&wl->lock);
+
+			if (created)
+				wl_put(wl); // KQ_WORKLOOP_CREATE's reference
+			wl_put(wl);
+			return created ? 0 : -EINVAL;
+
+		default:
+			return -EINVAL;
+	}
+}
+
 #else
 long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchanges,
 		struct kevent_qos_s* eventlist, int nevents,
 		void* data_out, unsigned long* data_available, unsigned int flags)
+{
+	return -ENOSYS;
+}
+
+long sys_kqueue_workloop_ctl(uint64_t cmd, uint64_t options, const void* addr, unsigned long sz)
 {
 	return -ENOSYS;
 }
