@@ -1,5 +1,6 @@
 #include <sys/errno.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
@@ -8,21 +9,33 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 
 extern char *strcpy(char *dest, const char *src);
+extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern int do_linux_fchmodat(int fd, const char* path, int mode, int flag);
+
+// setattrlist(), fsetattrlist() and setattrlistat(): as XNU, any attribute XNU can set is accepted. The times of
+// modification and access, the permissions and the owner are set; the rest have nowhere to go on a Linux file system
+// (creation and backup times, Finder information, flags, ACLs, protection classes, a volume's name) and are ignored.
 
 #define ATTR_BIT_MAP_COUNT 5
 
-#define ATTR_CMN_CRTIME 0x200
-#define ATTR_CMN_MODTIME 0x400
-#define ATTR_CMN_CHGTIME 0x800
-#define ATTR_CMN_ACCTIME 0x1000
-#define ATTR_CMN_ACCESSMASK 0x20000
+#define ATTR_CMN_SCRIPT 0x00000100
+#define ATTR_CMN_CRTIME 0x00000200
+#define ATTR_CMN_MODTIME 0x00000400
+#define ATTR_CMN_CHGTIME 0x00000800
+#define ATTR_CMN_ACCTIME 0x00001000
+#define ATTR_CMN_BKUPTIME 0x00002000
+#define ATTR_CMN_FNDRINFO 0x00004000
+#define ATTR_CMN_OWNERID 0x00008000
+#define ATTR_CMN_GRPID 0x00010000
+#define ATTR_CMN_ACCESSMASK 0x00020000
 
-#define COMMON_SUPPORTED (ATTR_CMN_MODTIME|ATTR_CMN_ACCTIME|ATTR_CMN_ACCESSMASK)
-#define VOLUME_SUPPORTED 0
-#define DIR_SUPPORTED 0
-#define FILE_SUPPORTED 0
-#define FORK_SUPPORTED 0
+// what XNU can set (sys/attr.h)
+#define ATTR_CMN_SETMASK 0x51C7FF00
+#define ATTR_CMN_VOLSETMASK 0x00006700
+#define ATTR_VOL_SETMASK 0x80002000
+#define ATTR_DIR_SETMASK 0x00000000
+#define ATTR_FILE_SETMASK 0x00000020
+#define ATTR_FORK_SETMASK 0x00000000
 
 #define FSOPT_NOFOLLOW 1
 
@@ -44,8 +57,10 @@ const char* path,
 struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options)
 {
 	int rv;
-	char* next;
+	const char* next;
 	int linux_at_flag = 0;
+	struct timespec times[2] = { { 0, LINUX_UTIME_OMIT }, { 0, LINUX_UTIME_OMIT } };
+	uint32_t owner = -1, group = -1;
 
 	if (options & FSOPT_NOFOLLOW)
 		linux_at_flag |= LINUX_AT_SYMLINK_NOFOLLOW;
@@ -68,67 +83,65 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 		return rv;
 #endif
 
-	if (alist->bitmapcount < ATTR_BIT_MAP_COUNT)
+	if (alist->bitmapcount != ATTR_BIT_MAP_COUNT)
 		return -EINVAL;
-
-	if ((alist->commonattr & COMMON_SUPPORTED) != alist->commonattr)
-		return -EINVAL;
-	if ((alist->volattr & VOLUME_SUPPORTED) != alist->volattr)
-		return -EINVAL;
-	if ((alist->dirattr & DIR_SUPPORTED) != alist->dirattr)
-		return -EINVAL;
-	if ((alist->fileattr & FILE_SUPPORTED) != alist->fileattr)
-		return -EINVAL;
-	if ((alist->forkattr & FORK_SUPPORTED) != alist->forkattr)
-		return -EINVAL;
-
-	next = (char*) attributeBuffer;
-
-	if (alist->commonattr & ATTR_CMN_CRTIME)
+	if (alist->volattr)
 	{
-		struct timespec* ts = (struct timespec*) next;
-		next += sizeof(struct timespec);
+		if ((alist->volattr & ~ATTR_VOL_SETMASK) || (alist->commonattr & ~ATTR_CMN_VOLSETMASK) || alist->fileattr ||
+				alist->forkattr)
+			return -EINVAL;
 	}
-    if (alist->commonattr & ATTR_CMN_MODTIME)
+	else if ((alist->commonattr & ~ATTR_CMN_SETMASK) || (alist->fileattr & ~ATTR_FILE_SETMASK) ||
+			(alist->dirattr & ~ATTR_DIR_SETMASK) || (alist->forkattr & ~ATTR_FORK_SETMASK))
+		return -EINVAL;
+
+	// the values, in the order of their bits; only those up to the permissions are needed
+	next = (const char*) attributeBuffer;
+	if (alist->commonattr & ATTR_CMN_SCRIPT)
+		next += sizeof(uint32_t);
+	if (alist->commonattr & ATTR_CMN_CRTIME)
+		next += sizeof(struct timespec);
+	if (alist->commonattr & ATTR_CMN_MODTIME)
 	{
-		struct timespec* ts = (struct timespec*) next;
-		struct timespec times[2] = {
-			{ LINUX_UTIME_OMIT, LINUX_UTIME_OMIT },
-			*ts
-		};
-#if HAS_PATH
-		rv = LINUX_SYSCALL(__NR_utimensat, LINUX_AT_FDCWD, vc.path, times, linux_at_flag);
-#else
-		rv = LINUX_SYSCALL(__NR_utimensat, fd, 0, times, linux_at_flag);
-#endif
-		if (rv < 0)
-			return errno_linux_to_bsd(rv);
+		memcpy(&times[1], next, sizeof(struct timespec));
 		next += sizeof(struct timespec);
 	}
 	if (alist->commonattr & ATTR_CMN_CHGTIME)
-	{
-		struct timespec* ts = (struct timespec*) next;
 		next += sizeof(struct timespec);
-	}
 	if (alist->commonattr & ATTR_CMN_ACCTIME)
 	{
-		struct timespec* ts = (struct timespec*) next;
-		struct timespec times[2] = {
-			*ts,
-			{ LINUX_UTIME_OMIT, LINUX_UTIME_OMIT }
-		};
+		memcpy(&times[0], next, sizeof(struct timespec));
+		next += sizeof(struct timespec);
+	}
+	if (alist->commonattr & ATTR_CMN_BKUPTIME)
+		next += sizeof(struct timespec);
+	if (alist->commonattr & ATTR_CMN_FNDRINFO)
+		next += 32;
+	if (alist->commonattr & ATTR_CMN_OWNERID)
+	{
+		memcpy(&owner, next, sizeof(owner));
+		next += sizeof(uint32_t);
+	}
+	if (alist->commonattr & ATTR_CMN_GRPID)
+	{
+		memcpy(&group, next, sizeof(group));
+		next += sizeof(uint32_t);
+	}
+
+	if (alist->commonattr & (ATTR_CMN_OWNERID | ATTR_CMN_GRPID))
+	{
 #if HAS_PATH
-		rv = LINUX_SYSCALL(__NR_utimensat, LINUX_AT_FDCWD, vc.path, times, linux_at_flag);
+		rv = LINUX_SYSCALL(__NR_fchownat, LINUX_AT_FDCWD, vc.path, owner, group, linux_at_flag);
 #else
-		rv = LINUX_SYSCALL(__NR_utimensat, fd, 0, times, linux_at_flag);
+		rv = LINUX_SYSCALL(__NR_fchown, fd, owner, group);
 #endif
 		if (rv < 0)
 			return errno_linux_to_bsd(rv);
-		next += sizeof(struct timespec);
 	}
-    if (alist->commonattr & ATTR_CMN_ACCESSMASK)
+	if (alist->commonattr & ATTR_CMN_ACCESSMASK)
 	{
-		int perms = *((int*) next);
+		uint32_t perms;
+		memcpy(&perms, next, sizeof(perms));
 #if HAS_PATH
 		rv = do_linux_fchmodat(LINUX_AT_FDCWD, vc.path, perms, linux_at_flag);
 #else
@@ -136,7 +149,16 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 #endif
 		if (rv < 0)
 			return errno_linux_to_bsd(rv);
-		next += 4;
+	}
+	if (alist->commonattr & (ATTR_CMN_MODTIME | ATTR_CMN_ACCTIME))
+	{
+#if HAS_PATH
+		rv = LINUX_SYSCALL(__NR_utimensat, LINUX_AT_FDCWD, vc.path, times, linux_at_flag);
+#else
+		rv = LINUX_SYSCALL(__NR_utimensat, fd, 0, times, linux_at_flag);
+#endif
+		if (rv < 0)
+			return errno_linux_to_bsd(rv);
 	}
 
 	return 0;
