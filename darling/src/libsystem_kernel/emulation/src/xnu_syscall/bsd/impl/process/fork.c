@@ -1,4 +1,5 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/process/fork.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/psynch/ulock_wait.h>
 
 #include <_libkernel_init.h>
 
@@ -42,16 +43,20 @@ long sys_fork_special_ports_locked(void)
 	int ret;
 	int wdfd = get_perthread_wd();
 
+	__darling_fork_prepare();
 #ifdef SYS_fork
 	ret = LINUX_SYSCALL(__NR_fork);
 #else
 	ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
 #endif
+	if (ret != 0)
+		__darling_fork_parent();
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 	else if (ret == 0)
 	{
 		// in the child
+		__darling_fork_child();
 
 #ifndef VARIANT_DYLD
 		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
@@ -98,6 +103,7 @@ long sys_fork_special_ports_locked(void)
 		workq_kevent_atfork_child();
 		workloop_atfork_child();
 		kqueue_atfork();
+		ulock_atfork_child();
 #endif
 	}
 #ifndef VARIANT_DYLD
