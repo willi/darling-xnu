@@ -4,6 +4,8 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
+#include <darling/emulation/common/simple.h>
+#include <darling/emulation/conversion/common_at.h>
 #include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
@@ -111,4 +113,53 @@ long xattr_list(long (*list)(long object, char* buf, unsigned long size), long o
 	if (len < 0)
 		return errno_linux_to_bsd(len);
 	return total;
+}
+
+static const char finder_info[] = "user.com.apple.FinderInfo";
+
+void xattr_finder_info_get(int dirfd, const char* lookup, char* out)
+{
+	char path[64 + 256];
+	long rv;
+
+	if (dirfd == LINUX_AT_FDCWD)
+		rv = LINUX_SYSCALL(__NR_getxattr, lookup, finder_info, out, XATTR_FINDERINFO_SIZE);
+	else
+	{
+		// Linux has no getxattrat(): the entry, through its directory's descriptor
+		__simple_sprintf(path, "/proc/self/fd/%d/%s", dirfd, lookup);
+		rv = LINUX_SYSCALL(__NR_lgetxattr, path, finder_info, out, XATTR_FINDERINFO_SIZE);
+	}
+	if (rv != XATTR_FINDERINFO_SIZE)
+		memset(out, 0, XATTR_FINDERINFO_SIZE);
+}
+
+long xattr_finder_info_set(const char* linux_path, int nofollow, int fd, const char* in)
+{
+	int empty = 1;
+	long rv;
+
+	for (int i = 0; i < XATTR_FINDERINFO_SIZE; i++)
+		if (in[i])
+			empty = 0;
+
+	if (empty)
+	{
+		if (!linux_path)
+			rv = LINUX_SYSCALL(__NR_fremovexattr, fd, finder_info);
+		else if (nofollow)
+			rv = LINUX_SYSCALL(__NR_lremovexattr, linux_path, finder_info);
+		else
+			rv = LINUX_SYSCALL(__NR_removexattr, linux_path, finder_info);
+		if (rv == -LINUX_ENODATA)
+			rv = 0;
+	}
+	else if (!linux_path)
+		rv = LINUX_SYSCALL(__NR_fsetxattr, fd, finder_info, in, XATTR_FINDERINFO_SIZE, 0);
+	else if (nofollow)
+		rv = LINUX_SYSCALL(__NR_lsetxattr, linux_path, finder_info, in, XATTR_FINDERINFO_SIZE, 0);
+	else
+		rv = LINUX_SYSCALL(__NR_setxattr, linux_path, finder_info, in, XATTR_FINDERINFO_SIZE, 0);
+
+	return rv < 0 ? errno_linux_to_bsd(rv) : 0;
 }

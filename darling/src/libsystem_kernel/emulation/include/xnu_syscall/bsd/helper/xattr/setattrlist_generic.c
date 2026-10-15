@@ -7,14 +7,16 @@
 #include <darling/emulation/conversion/common_at.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
 extern char *strcpy(char *dest, const char *src);
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern int do_linux_fchmodat(int fd, const char* path, int mode, int flag);
 
 // setattrlist(), fsetattrlist() and setattrlistat(): as XNU, any attribute XNU can set is accepted. The times of
-// modification and access, the permissions and the owner are set; the rest have nowhere to go on a Linux file system
-// (creation and backup times, Finder information, flags, ACLs, protection classes, a volume's name) and are ignored.
+// modification and access, the permissions, the owner and the Finder information (the com.apple.FinderInfo attribute,
+// as XNU keeps it) are set; the rest have nowhere to go on a Linux file system (creation and backup times, flags, ACLs,
+// protection classes, a volume's name) and are ignored.
 
 #define ATTR_BIT_MAP_COUNT 5
 
@@ -95,6 +97,26 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 			(alist->dirattr & ~ATTR_DIR_SETMASK) || (alist->forkattr & ~ATTR_FORK_SETMASK))
 		return -EINVAL;
 
+	// as XNU, a buffer too short for the values is refused before anything is set: those up to the permissions, in the
+	// order of their bits, are the ones read
+	{
+		static const struct { uint32_t bit, size; } sizes[] = {
+			{ ATTR_CMN_SCRIPT, sizeof(uint32_t) }, { ATTR_CMN_CRTIME, sizeof(struct timespec) },
+			{ ATTR_CMN_MODTIME, sizeof(struct timespec) }, { ATTR_CMN_CHGTIME, sizeof(struct timespec) },
+			{ ATTR_CMN_ACCTIME, sizeof(struct timespec) }, { ATTR_CMN_BKUPTIME, sizeof(struct timespec) },
+			{ ATTR_CMN_FNDRINFO, XATTR_FINDERINFO_SIZE }, { ATTR_CMN_OWNERID, sizeof(uint32_t) },
+			{ ATTR_CMN_GRPID, sizeof(uint32_t) }, { ATTR_CMN_ACCESSMASK, sizeof(uint32_t) },
+		};
+		__SIZE_TYPE__ needed = 0;
+		for (unsigned int i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+			if (alist->commonattr & sizes[i].bit)
+				needed += sizes[i].size;
+		if (needed && !attributeBuffer)
+			return -EFAULT;
+		if (bufferSize < needed)
+			return -EINVAL;
+	}
+
 	// the values, in the order of their bits; only those up to the permissions are needed
 	next = (const char*) attributeBuffer;
 	if (alist->commonattr & ATTR_CMN_SCRIPT)
@@ -115,8 +137,9 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 	}
 	if (alist->commonattr & ATTR_CMN_BKUPTIME)
 		next += sizeof(struct timespec);
+	const char* finder_info = next;
 	if (alist->commonattr & ATTR_CMN_FNDRINFO)
-		next += 32;
+		next += XATTR_FINDERINFO_SIZE;
 	if (alist->commonattr & ATTR_CMN_OWNERID)
 	{
 		memcpy(&owner, next, sizeof(owner));
@@ -149,6 +172,16 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 #endif
 		if (rv < 0)
 			return errno_linux_to_bsd(rv);
+	}
+	if (alist->commonattr & ATTR_CMN_FNDRINFO)
+	{
+#if HAS_PATH
+		rv = xattr_finder_info_set(vc.path, options & FSOPT_NOFOLLOW, -1, finder_info);
+#else
+		rv = xattr_finder_info_set(0, 0, fd, finder_info);
+#endif
+		if (rv < 0)
+			return rv;
 	}
 	if (alist->commonattr & (ATTR_CMN_MODTIME | ATTR_CMN_ACCTIME))
 	{

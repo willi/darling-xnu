@@ -34,4 +34,16 @@ long xattr_path(const char* path, int options, struct vchroot_expand_args* vc);
 long xattr_list(long (*list)(long object, char* buf, unsigned long size), long object, char* namebuf,
 	unsigned long size);
 
+// Finder information, which XNU keeps as the com.apple.FinderInfo attribute: getattrlist() and setattrlist()'s
+// ATTR_CMN_FNDRINFO read and write it, as getxattr() and setxattr() do
+#define XATTR_FINDERINFO_SIZE 32
+
+// an object's, into out: zeros when it has none. The object is lookup in dirfd (LINUX_AT_FDCWD: lookup is a Linux path,
+// which is followed; otherwise a name, which isn't)
+void xattr_finder_info_get(int dirfd, const char* lookup, char* out);
+
+// sets an object's (all zeros: removes it, as XNU does), by Linux path (followed unless nofollow) or, with no path, by
+// file descriptor
+long xattr_finder_info_set(const char* linux_path, int nofollow, int fd, const char* in);
+
 #endif // DARLING_EMULATION_XATTR_NAMES_H

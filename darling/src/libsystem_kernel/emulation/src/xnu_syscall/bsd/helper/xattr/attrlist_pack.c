@@ -7,6 +7,7 @@
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
 #define ATTR_CMN_DEVID 0x00000002
 #define ATTR_CMN_FSID 0x00000004
@@ -321,7 +322,9 @@ int attrlist_check(const struct xnu_attrlist* al, uint64_t options, int is_dir)
 }
 
 // the common attributes, in the order of their bits
-static void pack_common(struct packer* p, uint32_t c, const struct attrlist_object* obj)
+// type_bits: the access mask has the object's type in it (S_IFDIR, ...), as XNU's getattrlist() gives it for an object;
+// for a volume's root, it gives the permissions alone
+static void pack_common(struct packer* p, uint32_t c, const struct attrlist_object* obj, int type_bits)
 {
 	const struct linux_stat* st = obj->st;
 	if ((c & ATTR_CMN_ERROR) && (!p->return_valid || p->pack_invalid))
@@ -356,18 +359,19 @@ static void pack_common(struct packer* p, uint32_t c, const struct attrlist_obje
 		put_timespec(p, CMN, ATTR_CMN_ACCTIME, st->st_atime, st->st_atime_nsec);
 	if (c & ATTR_CMN_BKUPTIME)
 		put_timespec(p, CMN, ATTR_CMN_BKUPTIME, 0, 0);
-	// no Finder information, as XNU reports for a file without it
+	// the com.apple.FinderInfo attribute, as XNU keeps it; zeros for an object without it
 	if (c & ATTR_CMN_FNDRINFO)
 	{
-		static const char zeros[32];
-		put(p, CMN, ATTR_CMN_FNDRINFO, zeros, sizeof(zeros));
+		char info[XATTR_FINDERINFO_SIZE];
+		xattr_finder_info_get(obj->dirfd, obj->lookup, info);
+		put(p, CMN, ATTR_CMN_FNDRINFO, info, sizeof(info));
 	}
 	if (c & ATTR_CMN_OWNERID)
 		put32(p, CMN, ATTR_CMN_OWNERID, st->st_uid);
 	if (c & ATTR_CMN_GRPID)
 		put32(p, CMN, ATTR_CMN_GRPID, st->st_gid);
 	if (c & ATTR_CMN_ACCESSMASK)
-		put32(p, CMN, ATTR_CMN_ACCESSMASK, st->st_mode & 07777);
+		put32(p, CMN, ATTR_CMN_ACCESSMASK, st->st_mode & (type_bits ? (LINUX_S_IFMT | 07777) : 07777));
 	if (c & ATTR_CMN_FLAGS)
 		put32(p, CMN, ATTR_CMN_FLAGS, 0);
 	if (c & ATTR_CMN_GEN_COUNT)
@@ -401,7 +405,7 @@ uint32_t attrlist_pack(const struct xnu_attrlist* al, uint64_t options, const st
 	struct packer p;
 
 	start(&p, al, options, out);
-	pack_common(&p, al->commonattr, obj);
+	pack_common(&p, al->commonattr, obj, 1);
 
 	uint32_t d = is_dir ? al->dirattr : 0;
 	if (d & ATTR_DIR_LINKCOUNT)
@@ -502,7 +506,7 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 
 	start(&p, al, options, out);
 	// of the volume's root, but its name is the volume's
-	pack_common(&p, al->commonattr, root);
+	pack_common(&p, al->commonattr, root, 0);
 
 	uint32_t v = al->volattr;
 	if (v & ATTR_VOL_FSTYPE)
