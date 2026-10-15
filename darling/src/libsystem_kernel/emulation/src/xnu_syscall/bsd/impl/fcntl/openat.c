@@ -17,6 +17,9 @@
 #ifndef LINUX_O_PATH
 #	define LINUX_O_PATH 010000000
 #endif
+#ifndef XNU_O_EVTONLY
+#	define XNU_O_EVTONLY 0x8000
+#endif
 #ifndef LINUX_ELOOP
 #	define LINUX_ELOOP 40
 #endif
@@ -95,7 +98,9 @@ long sys_openat_nocancel(int fd, const char* filename, int flags, unsigned int m
 	// symlink, and only then is the O_PATH descriptor needed). MobileInstallation
 	// opens the directories it copies with O_SYMLINK and lists them with
 	// getattrlistbulk(), which an O_PATH descriptor can't do.
-	if (flags & BSD_O_SYMLINK)
+	//
+	// an event-only descriptor (O_EVTONLY, for watching the object) needs no access to it: that stays O_PATH
+	if ((flags & BSD_O_SYMLINK) && !(flags & XNU_O_EVTONLY))
 	{
 		ret = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, linux_flags & ~LINUX_O_PATH, mode);
 		if (ret != -LINUX_ELOOP)
