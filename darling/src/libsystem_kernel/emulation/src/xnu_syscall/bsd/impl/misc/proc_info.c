@@ -815,9 +815,11 @@ bail:
 }
 
 // The platform the process's executable was built for (a PLATFORM_* value), as XNU records it at exec: from
-// LC_BUILD_VERSION, else from an LC_VERSION_MIN_* command, else 0.
+// LC_BUILD_VERSION, else from an LC_VERSION_MIN_* command, else 0. The calling process's own is read once: its
+// executable can't change without an exec, which starts over with fresh memory.
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize)
 {
+	static uint32_t self_platform; // the platform + 1; 0 until it's known
 	static const struct { uint32_t cmd, platform; } version_min[] = {
 		{ LC_VERSION_MIN_MACOSX, PLATFORM_MACOS },
 		{ LC_VERSION_MIN_IPHONEOS, PLATFORM_IOS },
@@ -833,6 +835,12 @@ static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsiz
 
 	if (bufsize < (int32_t) sizeof(platform))
 		return -ENOMEM;
+	if (pid == sys_getpid() && (platform = __atomic_load_n(&self_platform, __ATOMIC_RELAXED)) != 0)
+	{
+		platform--;
+		memcpy(buffer, &platform, sizeof(platform));
+		return sizeof(platform);
+	}
 
 	fd = executable_open(pid);
 	if (fd < 0)
@@ -850,6 +858,8 @@ static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsiz
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
 
+	if (pid == sys_getpid())
+		__atomic_store_n(&self_platform, platform + 1, __ATOMIC_RELAXED);
 	memcpy(buffer, &platform, sizeof(platform));
 	return sizeof(platform);
 }

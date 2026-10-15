@@ -264,10 +264,9 @@ attr_dir_entrycount_out_no_fd:
 		next += 8;
 	}
 
-	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < spaceNeeded)
-		bufferSize = spaceNeeded;
-
-	*((uint32_t*) ourBuffer) = bufferSize;
+	// as XNU: the length is of what was returned, or with FSOPT_REPORT_FULLSIZE of everything asked for (so the caller
+	// can size its buffer)
+	*((uint32_t*) ourBuffer) = (options & FSOPT_REPORT_FULLSIZE) ? spaceNeeded : min(bufferSize, spaceNeeded);
 
 	memcpy(attributeBuffer, ourBuffer, min(bufferSize, spaceNeeded));
 	

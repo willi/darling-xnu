@@ -167,6 +167,8 @@ static long read_code_signature(int pid, struct code_signature* sig)
 		goto out;
 	version = __builtin_bswap32(cd.version);
 
+	// as XNU at exec: the CodeDirectory's flags (CS_RUNTIME, CS_RESTRICT, ...) become the process's, even though
+	// nothing here enforces them
 	sig->flags = CS_SIGNED | CS_VALID | (__builtin_bswap32(cd.flags) & CS_ALLOWED_MACHO);
 	if ((ret = read_cd_string(fd, cd_offset, cd_length, __builtin_bswap32(cd.identOffset), sig->identity, sizeof(sig->identity))) < 0)
 		goto out;
@@ -189,6 +191,36 @@ out:
 	return ret;
 }
 
+// The calling process's own signature and CDHash are worked out once (CS_OPS_STATUS is frequent): its executable
+// can't change without an exec, which starts over with fresh memory, and a forked child runs the same one. The first
+// thread to get here fills the cache; any other meanwhile works its answer out itself.
+enum { CACHE_EMPTY, CACHE_FILLING, CACHE_FULL };
+static int self_sig_state;
+static struct code_signature self_sig;
+static long self_sig_ret;
+
+static long code_signature_of(int pid, struct code_signature* sig)
+{
+	int expected = CACHE_EMPTY;
+	long ret;
+
+	if (pid != sys_getpid())
+		return read_code_signature(pid, sig);
+	if (__atomic_load_n(&self_sig_state, __ATOMIC_ACQUIRE) == CACHE_FULL)
+	{
+		*sig = self_sig;
+		return self_sig_ret;
+	}
+	ret = read_code_signature(pid, sig);
+	if (__atomic_compare_exchange_n(&self_sig_state, &expected, CACHE_FILLING, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+	{
+		self_sig = *sig;
+		self_sig_ret = ret;
+		__atomic_store_n(&self_sig_state, CACHE_FULL, __ATOMIC_RELEASE);
+	}
+	return ret;
+}
+
 // Copies out the process's signing identifier or team identifier as XNU does: behind an 8-byte blob header that holds
 // the total length, with only the header (and ERANGE) when the buffer is too small, and ENOENT when there is none.
 static long copy_identity(int pid, unsigned int ops, void* useraddr, size_t usersize)
@@ -200,7 +232,7 @@ static long copy_identity(int pid, unsigned int ops, void* useraddr, size_t user
 
 	if (usersize < 8)
 		return -ERANGE;
-	if ((ret = read_code_signature(pid, &sig)) < 0)
+	if ((ret = code_signature_of(pid, &sig)) < 0)
 		return errno_linux_to_bsd(ret);
 	if ((sig.flags & CS_VALID) == 0)
 		return -EINVAL;
@@ -219,8 +251,12 @@ static long copy_identity(int pid, unsigned int ops, void* useraddr, size_t user
 
 // Copies out the process's CDHash as XNU does: the first 20 bytes of the hash of its CodeDirectory, the one with the
 // strongest hash type when it has alternates. Only SHA-256 CodeDirectories are supported.
+static int self_cdhash_state;
+static uint8_t self_cdhash[CS_CDHASH_LEN];
+
 static long copy_cdhash(int pid, void* useraddr, size_t usersize)
 {
+	int expected = CACHE_EMPTY;
 	uint8_t buf[4096], digest[SHA256_BLOCK_SIZE], hash_type;
 	uint64_t offset = 0, candidate;
 	uint32_t length = 0, candidate_length, slot, done, chunk;
@@ -230,6 +266,12 @@ static long copy_cdhash(int pid, void* useraddr, size_t usersize)
 
 	if (usersize < CS_CDHASH_LEN)
 		return -ERANGE;
+	// the calling process's is worked out once (see code_signature_of())
+	if (pid == sys_getpid() && __atomic_load_n(&self_cdhash_state, __ATOMIC_ACQUIRE) == CACHE_FULL)
+	{
+		memcpy(useraddr, self_cdhash, CS_CDHASH_LEN);
+		return 0;
+	}
 
 	fd = executable_open(pid);
 	if (fd < 0)
@@ -268,6 +310,12 @@ static long copy_cdhash(int pid, void* useraddr, size_t usersize)
 	}
 	sha256_final(&ctx, digest);
 	memcpy(useraddr, digest, CS_CDHASH_LEN);
+	if (pid == sys_getpid() &&
+		__atomic_compare_exchange_n(&self_cdhash_state, &expected, CACHE_FILLING, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+	{
+		memcpy(self_cdhash, digest, CS_CDHASH_LEN);
+		__atomic_store_n(&self_cdhash_state, CACHE_FULL, __ATOMIC_RELEASE);
+	}
 
 out:
 	LINUX_SYSCALL1(__NR_close, fd);
@@ -290,7 +338,7 @@ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
 				break;
 			}
 			// an unsigned or unreadable executable stays CS_VALID as Darling always had it: nothing here enforces signatures
-			if (read_code_signature(pid, &sig) < 0 || sig.flags == 0)
+			if (code_signature_of(pid, &sig) < 0 || sig.flags == 0)
 				sig.flags = CS_VALID;
 			*(uint32_t*)useraddr = sig.flags;
 			ret = 0;
