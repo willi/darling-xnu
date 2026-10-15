@@ -23,6 +23,10 @@
 #define LINUX_F_OFD_GETLK 36
 #define LINUX_F_OFD_SETLK 37
 #define LINUX_F_OFD_SETLKW 38
+#define XNU_F_SETLKWTIMEOUT 10
+#define XNU_F_OFD_SETLKWTIMEOUT 93
+
+#define LINUX_CLOCK_MONOTONIC 1
 
 #ifndef O_NOFOLLOW
 #   define O_NOFOLLOW 0x0100
@@ -83,6 +87,56 @@ static int cmd_bsd_to_linux(int bsd) {
 	};
 };
 
+struct timeout_timespec
+{
+	long tv_sec;
+	long tv_nsec;
+};
+
+struct bsd_flocktimeout
+{
+	struct bsd_flock fl;
+	struct timeout_timespec timeout;
+};
+
+static long long ns_now(void)
+{
+	struct timeout_timespec ts;
+	LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+// F_SETLKWTIMEOUT and F_OFD_SETLKWTIMEOUT: as F_SETLKW and F_OFD_SETLKW, but failing with ETIMEDOUT once the timeout
+// (from now; none: no limit) passes, as XNU's lf_setlock(). Linux has no such wait: the lock is tried again until
+// then. Apple's SQLite waits for its locks this way.
+static long setlk_timeout(int fd, int cmd, struct bsd_flocktimeout* ft)
+{
+	int ofd = cmd == XNU_F_OFD_SETLKWTIMEOUT;
+	long long end, now, delay = 1000000;
+
+	if (!ft)
+		return -EFAULT;
+	if (!ft->timeout.tv_sec && !ft->timeout.tv_nsec)
+		return sys_fcntl_nocancel(fd, ofd ? XNU_F_OFD_SETLKW : F_SETLKW, (long) &ft->fl);
+
+	end = ns_now() + ft->timeout.tv_sec * 1000000000LL + ft->timeout.tv_nsec;
+	for (;;)
+	{
+		long rv = sys_fcntl_nocancel(fd, ofd ? XNU_F_OFD_SETLK : F_SETLK, (long) &ft->fl);
+		if (rv != -EAGAIN && rv != -EACCES)
+			return rv;
+		now = ns_now();
+		if (now >= end)
+			return -ETIMEDOUT;
+		if (delay > end - now)
+			delay = end - now;
+		struct timeout_timespec ts = { delay / 1000000000LL, delay % 1000000000LL };
+		LINUX_SYSCALL(__NR_nanosleep, &ts, 0);
+		if (delay < 16000000)
+			delay *= 2;
+	}
+}
+
 long sys_fcntl(int fd, int cmd, long arg)
 {
 	CANCELATION_POINT();
@@ -98,6 +152,9 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 	{
 		case F_CHECK_LV:
 			return 0;
+		case XNU_F_SETLKWTIMEOUT:
+		case XNU_F_OFD_SETLKWTIMEOUT:
+			return setlk_timeout(fd, cmd, (struct bsd_flocktimeout*) arg);
 		// Darling does not enforce code signatures: accept the file's signature as covering the whole file.
 		// dyld (and the iOS Simulator's dyld_sim) refuse to map an image whose signature does not reach its
 		// code signature blob, so F_ADDFILESIGS_RETURN reports the largest end offset.
