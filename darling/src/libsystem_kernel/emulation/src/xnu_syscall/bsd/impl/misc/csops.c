@@ -4,6 +4,8 @@
 #include <mach-o/loader.h>
 #include <sys/codesign.h>
 #include <sys/errno.h>
+#include <stddef.h>
+#include <string.h>
 #include <strings.h>
 
 #include <darling/emulation/common/base.h>
@@ -11,6 +13,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/sha256.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
 #include <darlingserver/rpc.h>
 
@@ -25,8 +28,9 @@
 #endif
 
 // Finds the blob in the given slot of an executable's embedded code signature: its offset in the file and its length,
-// or a length of 0 when the executable has no such blob. Returns a negative Linux errno on failure.
-static long find_signature_blob(int fd, uint32_t slot, uint64_t* out_offset, uint32_t* out_length)
+// or a length of 0 when the executable has no such blob. A blob without the given magic is an error. Returns a negative
+// Linux errno on failure.
+static long find_signature_blob(int fd, uint32_t slot, uint32_t magic, uint64_t* out_offset, uint32_t* out_length)
 {
 	struct linkedit_data_command lc;
 	uint32_t superblob[3], index[2], blob[2];
@@ -65,7 +69,7 @@ static long find_signature_blob(int fd, uint32_t slot, uint64_t* out_offset, uin
 		*out_length = __builtin_bswap32(blob[1]);
 		if (*out_length < sizeof(blob) || (uint64_t) __builtin_bswap32(index[1]) + *out_length > lc.datasize)
 			return -LINUX_ENOEXEC;
-		if (__builtin_bswap32(blob[0]) != (slot == CSSLOT_ENTITLEMENTS ? CSMAGIC_EMBEDDED_ENTITLEMENTS : CSMAGIC_EMBEDDED_DER_ENTITLEMENTS))
+		if (__builtin_bswap32(blob[0]) != magic)
 			return -LINUX_ENOEXEC;
 		return 0;
 	}
@@ -87,7 +91,8 @@ static long copy_entitlements(int pid, uint32_t slot, void* useraddr, size_t use
 	fd = executable_open(pid);
 	if (fd < 0)
 		return errno_linux_to_bsd(fd);
-	ret = find_signature_blob(fd, slot, &offset, &length);
+	ret = find_signature_blob(fd, slot, slot == CSSLOT_ENTITLEMENTS ? CSMAGIC_EMBEDDED_ENTITLEMENTS : CSMAGIC_EMBEDDED_DER_ENTITLEMENTS,
+		&offset, &length);
 	if (ret == 0 && length == 0)
 		memset(useraddr, 0, 8);
 	else if (ret == 0 && usersize < length)
@@ -103,8 +108,174 @@ static long copy_entitlements(int pid, uint32_t slot, void* useraddr, size_t use
 	return ret < 0 ? errno_linux_to_bsd(ret) : 0;
 }
 
+// What a process's code signature says about it, as XNU records it at exec. Darling verifies no signature: a signed
+// executable counts as valid, and an Apple-signed one (a CMS signature and a com.apple. identifier) as a platform binary,
+// which is what AMFI makes of the simulator runtime's binaries on a Mac.
+struct code_signature
+{
+	uint32_t flags; // CS_* status flags
+	char identity[256];
+	char team_id[64];
+};
+
+// Copies the NUL-terminated string at `offset` within the CodeDirectory at `cd` (of `cd_length` bytes) into `out`, or an
+// empty string when it does not fit.
+static long read_cd_string(int fd, uint64_t cd, uint32_t cd_length, uint32_t offset, char* out, size_t size)
+{
+	size_t len;
+	long ret;
+
+	out[0] = '\0';
+	if (offset == 0 || offset >= cd_length)
+		return 0;
+	len = cd_length - offset < size ? cd_length - offset : size;
+	// a string shorter than the buffer may end less than `size` bytes before the CodeDirectory does
+	if ((ret = executable_read(fd, out, len, cd + offset)) < 0)
+		return ret;
+	if (strnlen(out, len) == len)
+		out[0] = '\0';
+	return 0;
+}
+
+static long read_code_signature(int pid, struct code_signature* sig)
+{
+	struct {
+		uint32_t magic, length, version, flags, hashOffset, identOffset, nSpecialSlots, nCodeSlots, codeLimit;
+		uint8_t hashSize, hashType, platform, pageSize;
+		uint32_t spare2, scatterOffset, teamOffset;
+	} cd;
+	uint64_t cd_offset, cms_offset;
+	uint32_t cd_length, cms_length, version;
+	long ret;
+	int fd;
+
+	memset(sig, 0, sizeof(*sig));
+	fd = executable_open(pid);
+	if (fd < 0)
+		return fd;
+
+	ret = find_signature_blob(fd, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY, &cd_offset, &cd_length);
+	if (ret < 0 || cd_length == 0)
+		goto out;
+	if (cd_length < offsetof(typeof(cd), scatterOffset))
+	{
+		ret = -LINUX_ENOEXEC;
+		goto out;
+	}
+	memset(&cd, 0, sizeof(cd));
+	if ((ret = executable_read(fd, &cd, cd_length < sizeof(cd) ? cd_length : sizeof(cd), cd_offset)) < 0)
+		goto out;
+	version = __builtin_bswap32(cd.version);
+
+	sig->flags = CS_SIGNED | CS_VALID | (__builtin_bswap32(cd.flags) & CS_ALLOWED_MACHO);
+	if ((ret = read_cd_string(fd, cd_offset, cd_length, __builtin_bswap32(cd.identOffset), sig->identity, sizeof(sig->identity))) < 0)
+		goto out;
+	if (version >= CS_SUPPORTSTEAMID && cd_length >= sizeof(cd))
+	{
+		ret = read_cd_string(fd, cd_offset, cd_length, __builtin_bswap32(cd.teamOffset), sig->team_id, sizeof(sig->team_id));
+		if (ret < 0)
+			goto out;
+	}
+
+	ret = find_signature_blob(fd, CSSLOT_SIGNATURESLOT, CSMAGIC_BLOBWRAPPER, &cms_offset, &cms_length);
+	if (ret < 0)
+		goto out;
+	// an ad-hoc signature has an empty CMS blob: just its header
+	if (cms_length > 8 && strncmp(sig->identity, "com.apple.", 10) == 0)
+		sig->flags |= CS_PLATFORM_BINARY;
+
+out:
+	LINUX_SYSCALL1(__NR_close, fd);
+	return ret;
+}
+
+// Copies out the process's signing identifier or team identifier as XNU does: behind an 8-byte blob header that holds
+// the total length, with only the header (and ERANGE) when the buffer is too small, and ENOENT when there is none.
+static long copy_identity(int pid, unsigned int ops, void* useraddr, size_t usersize)
+{
+	struct code_signature sig;
+	const char* identity;
+	size_t length;
+	long ret;
+
+	if (usersize < 8)
+		return -ERANGE;
+	if ((ret = read_code_signature(pid, &sig)) < 0)
+		return errno_linux_to_bsd(ret);
+	if ((sig.flags & CS_VALID) == 0)
+		return -EINVAL;
+	identity = ops == CS_OPS_TEAMID ? sig.team_id : sig.identity;
+	if (identity[0] == '\0')
+		return -ENOENT;
+
+	length = strlen(identity) + 1;
+	memset(useraddr, 0, 8);
+	((uint32_t*) useraddr)[1] = __builtin_bswap32(length + 8);
+	if (usersize < length + 8)
+		return -ERANGE;
+	memcpy((char*) useraddr + 8, identity, length);
+	return 0;
+}
+
+// Copies out the process's CDHash as XNU does: the first 20 bytes of the hash of its CodeDirectory, the one with the
+// strongest hash type when it has alternates. Only SHA-256 CodeDirectories are supported.
+static long copy_cdhash(int pid, void* useraddr, size_t usersize)
+{
+	uint8_t buf[4096], digest[SHA256_BLOCK_SIZE], hash_type;
+	uint64_t offset = 0, candidate;
+	uint32_t length = 0, candidate_length, slot, done, chunk;
+	SHA256_CTX ctx;
+	long ret = 0;
+	int fd;
+
+	if (usersize < CS_CDHASH_LEN)
+		return -ERANGE;
+
+	fd = executable_open(pid);
+	if (fd < 0)
+		return errno_linux_to_bsd(fd);
+
+	// the primary CodeDirectory, then the alternates: XNU picks the strongest, and SHA-256 is the strongest codesign emits
+	for (slot = CSSLOT_CODEDIRECTORY; slot < CSSLOT_ALTERNATE_CODEDIRECTORY_LIMIT && length == 0;
+		slot = slot == CSSLOT_CODEDIRECTORY ? CSSLOT_ALTERNATE_CODEDIRECTORIES : slot + 1)
+	{
+		ret = find_signature_blob(fd, slot, CSMAGIC_CODEDIRECTORY, &candidate, &candidate_length);
+		if (ret < 0)
+			goto out;
+		if (candidate_length < offsetof(CS_CodeDirectory, pageSize) + 1)
+			continue;
+		if ((ret = executable_read(fd, &hash_type, 1, candidate + offsetof(CS_CodeDirectory, hashType))) < 0)
+			goto out;
+		if (hash_type == CS_HASHTYPE_SHA256)
+		{
+			offset = candidate;
+			length = candidate_length;
+		}
+	}
+	if (length == 0)
+	{
+		ret = -LINUX_EINVAL;
+		goto out;
+	}
+
+	sha256_init(&ctx);
+	for (done = 0; done < length; done += chunk)
+	{
+		chunk = length - done < sizeof(buf) ? length - done : sizeof(buf);
+		if ((ret = executable_read(fd, buf, chunk, offset + done)) < 0)
+			goto out;
+		sha256_update(&ctx, buf, chunk);
+	}
+	sha256_final(&ctx, digest);
+	memcpy(useraddr, digest, CS_CDHASH_LEN);
+
+out:
+	LINUX_SYSCALL1(__NR_close, fd);
+	return ret < 0 ? errno_linux_to_bsd(ret) : 0;
+}
+
 // TODO: actually implement the rest
-// Only the entitlements are real: the other operations return no actual data.
+// Only the status, CDHash, identities and entitlements are real: the other operations return no actual data.
 long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
 	int ret = 0;
 
@@ -113,7 +284,25 @@ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
 
 	switch (ops) {
 		case CS_OPS_STATUS: {
-			*(uint32_t*)useraddr = CS_VALID;
+			struct code_signature sig;
+			if (usersize < sizeof(uint32_t)) {
+				ret = -EINVAL;
+				break;
+			}
+			// an unsigned or unreadable executable stays CS_VALID as Darling always had it: nothing here enforces signatures
+			if (read_code_signature(pid, &sig) < 0 || sig.flags == 0)
+				sig.flags = CS_VALID;
+			*(uint32_t*)useraddr = sig.flags;
+			ret = 0;
+		} break;
+
+		case CS_OPS_CDHASH: {
+			ret = copy_cdhash(pid, useraddr, usersize);
+		} break;
+
+		case CS_OPS_IDENTITY:
+		case CS_OPS_TEAMID: {
+			ret = copy_identity(pid, ops, useraddr, usersize);
 		} break;
 
 		case CS_OPS_ENTITLEMENTS_BLOB: {
@@ -124,8 +313,7 @@ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
 			ret = copy_entitlements(pid, CSSLOT_DER_ENTITLEMENTS, useraddr, usersize);
 		} break;
 
-		case CS_OPS_BLOB:
-		case CS_OPS_IDENTITY: {
+		case CS_OPS_BLOB: {
 			memset(useraddr, 0, usersize);
 		} break;
 

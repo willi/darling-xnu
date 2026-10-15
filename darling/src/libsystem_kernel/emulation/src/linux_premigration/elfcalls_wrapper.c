@@ -105,3 +105,15 @@ int __dserver_process_lifetime_pipe_refresh(void) {
 void __dserver_close_process_lifetime_pipe(int fd) {
 	return elfcalls()->dserver_close_process_lifetime_pipe(fd);
 };
+
+void __darling_fork_prepare(void) {
+	elfcalls()->fork_prepare();
+};
+
+void __darling_fork_parent(void) {
+	elfcalls()->fork_parent();
+};
+
+void __darling_fork_child(void) {
+	elfcalls()->fork_child();
+};

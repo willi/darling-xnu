@@ -33,6 +33,8 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
 
 #include <darlingserver/rpc.h>
+#include <mach-o/loader.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
 
 #define LINUX_PR_SET_NAME 15
 
@@ -128,6 +130,7 @@ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer
 static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, int32_t buffer_size);
@@ -182,6 +185,10 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		case PROC_PIDLISTTHREADS:
 		{
 			return _proc_pidinfo_listthreads(pid, buffer, bufsize);
+		}
+		case PROC_PIDPLATFORMINFO:
+		{
+			return _proc_pidinfo_platforminfo(pid, buffer, bufsize);
 		}
 		default:
 		{
@@ -805,4 +812,44 @@ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize
 bail:
 	close_internal(fd);
 	return count * sizeof(uint64_t);
+}
+
+// The platform the process's executable was built for (a PLATFORM_* value), as XNU records it at exec: from
+// LC_BUILD_VERSION, else from an LC_VERSION_MIN_* command, else 0.
+static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize)
+{
+	static const struct { uint32_t cmd, platform; } version_min[] = {
+		{ LC_VERSION_MIN_MACOSX, PLATFORM_MACOS },
+		{ LC_VERSION_MIN_IPHONEOS, PLATFORM_IOS },
+		{ LC_VERSION_MIN_TVOS, PLATFORM_TVOS },
+		{ LC_VERSION_MIN_WATCHOS, PLATFORM_WATCHOS },
+	};
+	struct build_version_command bv;
+	struct version_min_command vm;
+	uint32_t platform = 0;
+	uint64_t base;
+	long ret;
+	int fd, i;
+
+	if (bufsize < (int32_t) sizeof(platform))
+		return -ENOMEM;
+
+	fd = executable_open(pid);
+	if (fd < 0)
+		return errno_linux_to_bsd(fd);
+	ret = executable_find_load_command(fd, LC_BUILD_VERSION, &bv, sizeof(bv), &base);
+	if (ret > 0)
+		platform = bv.platform;
+	for (i = 0; ret == 0 && i < (int) (sizeof(version_min) / sizeof(version_min[0])); i++)
+	{
+		ret = executable_find_load_command(fd, version_min[i].cmd, &vm, sizeof(vm), &base);
+		if (ret > 0)
+			platform = version_min[i].platform;
+	}
+	LINUX_SYSCALL1(__NR_close, fd);
+	if (ret < 0)
+		return errno_linux_to_bsd(ret);
+
+	memcpy(buffer, &platform, sizeof(platform));
+	return sizeof(platform);
 }
