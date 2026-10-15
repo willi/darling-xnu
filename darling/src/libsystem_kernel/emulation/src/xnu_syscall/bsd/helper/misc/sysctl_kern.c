@@ -18,6 +18,8 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/common/libsystem.h>
+#include <darling/emulation/conversion/common_at.h>
+#include <darling/emulation/conversion/duct_errno.h>
 
 #include <darling-config.h>
 
@@ -141,31 +143,66 @@ sysctl_handler(handle_argmax)
 	return 0;
 }
 
+// when the system booted, in seconds since the epoch: Linux's own answer (btime in /proc/stat), which, unlike the time
+// less the uptime (both in whole seconds, and changing at different moments), is the same every time it's asked.
+// CLOCK_MONOTONIC is the time of day less this, and went back and forth by a second. Read once: it doesn't change.
+static long long boot_time(void)
+{
+	static long long btime = -1;
+	static const char key[] = "\nbtime ";
+	char buf[1024];
+	unsigned int matched = 0;
+	long long value = 0;
+	int fd, n, digits = 0;
+
+	if (btime >= 0)
+		return btime;
+
+	fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, "/proc/stat", LINUX_O_RDONLY | LINUX_O_CLOEXEC, 0);
+	if (fd < 0)
+		return fd;
+	while ((n = LINUX_SYSCALL(__NR_read, fd, buf, sizeof(buf))) > 0)
+	{
+		for (int i = 0; i < n; i++)
+		{
+			char c = buf[i];
+			if (matched < sizeof(key) - 1)
+				matched = (c == key[matched]) ? matched + 1 : (c == key[0]);
+			else if (c >= '0' && c <= '9')
+				value = value * 10 + (c - '0'), digits++;
+			else
+				goto done;
+		}
+	}
+done:
+	close_internal(fd);
+	if (!digits)
+		return -LINUX_ENOENT;
+	btime = value;
+	return btime;
+}
+
 sysctl_handler(handle_boottime)
 {
 	// Fill in struct timeval { tv_sec, tv_usec }
-	struct sysinfo info;
 	struct bsd_timeval* tv;
+	long long btime = boot_time();
 
-	if (__linux_sysinfo(&info) == -1)
-		return -errno;
+	if (btime < 0)
+		return errno_linux_to_bsd(btime);
 
 	tv = (struct bsd_timeval*) old;
 	if (tv != NULL)
 	{
 		if (*oldlen < sizeof(*tv))
 			return -EINVAL;
-		sys_gettimeofday(tv, NULL);
-
-		tv->tv_sec -= info.uptime;
-
-		// we don't want the microseconds to be constantly jumping around
-		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-		// but Linux doesn't give us microseconds, so just settle for 0
+		tv->tv_sec = btime;
+		// a whole second, as Linux gives it: the same in every process, and in every call (libc's
+		// _mach_boottime_usec() loops until two calls agree)
 		tv->tv_usec = 0;
 	}
 	*oldlen = sizeof(*tv);
-	
+
 	return 0;
 }
 
