@@ -302,7 +302,13 @@ kern_return_t _kernelrpc_mach_vm_protect_trap_impl(
 	if (new_protection & VM_PROT_EXECUTE)
 		prot |= PROT_EXEC;
 
-	ret = mprotect((void*)address, size, prot);
+	// as XNU: the pages the range touches, wherever in a page it starts (Linux wants it page-aligned). ColorSync
+	// makes its color-conversion tables read-only this way, and without them the render server draws no image with a
+	// color profile.
+	mach_vm_address_t start = address & ~(mach_vm_address_t) 4095;
+	mach_vm_address_t end = (address + size + 4095) & ~(mach_vm_address_t) 4095;
+
+	ret = mprotect((void*)start, end - start, prot);
 	if (ret == -1)
 		return KERN_FAILURE;
 
