@@ -16,6 +16,14 @@
 #define XNU_F_GETPROTECTIONCLASS 63
 #define XNU_F_SETPROTECTIONCLASS 64
 
+// locks of an open file description, rather than of a process: XNU's and Linux's are the same
+#define XNU_F_OFD_SETLK 90
+#define XNU_F_OFD_SETLKW 91
+#define XNU_F_OFD_GETLK 92
+#define LINUX_F_OFD_GETLK 36
+#define LINUX_F_OFD_SETLK 37
+#define LINUX_F_OFD_SETLKW 38
+
 #ifndef O_NOFOLLOW
 #   define O_NOFOLLOW 0x0100
 #endif
@@ -64,6 +72,12 @@ static int cmd_bsd_to_linux(int bsd) {
 		case F_SETLK:  return LINUX_F_SETLK;
 		case F_SETLKW: return LINUX_F_SETLKW;
 		case F_GETLK:  return LINUX_F_GETLK;
+		// Apple's SQLite probes a file system's locking with F_OFD_GETLK; when that fails with anything but
+		// ENOTSUP, it falls back to dot-file locks, which outlive a process that dies holding them (and a device
+		// restarted after a shutdown found its databases locked for good)
+		case XNU_F_OFD_SETLK:  return LINUX_F_OFD_SETLK;
+		case XNU_F_OFD_SETLKW: return LINUX_F_OFD_SETLKW;
+		case XNU_F_OFD_GETLK:  return LINUX_F_OFD_GETLK;
 		case F_DUPFD_CLOEXEC: return LINUX_F_DUPFD_CLOEXEC;
 		default:       return -1;
 	};
@@ -124,14 +138,18 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 		}
 		case F_SETLK:
 		case F_SETLKW:
-		case F_GETLK: {
+		case F_GETLK:
+		case XNU_F_OFD_SETLK:
+		case XNU_F_OFD_SETLKW:
+		case XNU_F_OFD_GETLK: {
 			struct bsd_flock* bsd_struct = arg;
 			struct linux_flock* linux_struct = __builtin_alloca(sizeof(struct linux_flock));
 			linux_struct->l_type = flock_type_bsd_to_linux(bsd_struct->l_type);
 			linux_struct->l_whence = bsd_struct->l_whence;
 			linux_struct->l_start = bsd_struct->l_start;
 			linux_struct->l_len = bsd_struct->l_len;
-			linux_struct->l_pid = bsd_struct->l_pid;
+			// XNU ignores it for an OFD lock; Linux wants it 0
+			linux_struct->l_pid = (cmd == F_SETLK || cmd == F_SETLKW || cmd == F_GETLK) ? bsd_struct->l_pid : 0;
 			arg = linux_struct;
 		} break;
 		case F_FULLFSYNC: {
@@ -164,7 +182,10 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 			break;
 		case F_SETLK:
 		case F_SETLKW:
-		case F_GETLK: {
+		case F_GETLK:
+		case XNU_F_OFD_SETLK:
+		case XNU_F_OFD_SETLKW:
+		case XNU_F_OFD_GETLK: {
 			struct bsd_flock* bsd_struct = original_arg;
 			struct linux_flock* linux_struct = arg;
 			bsd_struct->l_type = flock_type_linux_to_bsd(linux_struct->l_type);
