@@ -12,7 +12,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/stat/fstatfs.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 
 // getattrlist(), fgetattrlist() and getattrlistat(): the attributes of an object, or of the volume it is on, packed as
 // attrlist_pack.h says.
@@ -45,16 +45,37 @@ static char* last_slash(char* s)
 struct object
 {
 	struct linux_stat st, parent;
-	char proc_path[32], fullpath[XNU_MAXPATHLEN];
+	char proc_path[32], fullpath[XNU_MAXPATHLEN], name[256];
 	struct attrlist_object obj;
 };
 
-static long describe(int objfd, struct object* o)
+#define ATTR_CMN_PAROBJID 0x00000080
+#define ATTR_CMN_FULLPATH 0x08000000
+#define ATTR_CMN_PARENTID 0x40000000
+#define ATTR_DIR_MOUNTSTATUS 0x00000004
+#define ATTR_CMNEXT_RELPATH 0x00000004
+#define ATTR_CMNEXT_NOFIRMLINKPATH 0x00000020
+
+// the directory it's in and its path are only looked up for the attributes that need them: they cost path walks, and
+// a path can be too long for the process to be given
+static int needs_parent(const struct xnu_attrlist* al)
+{
+	return (al->commonattr & (ATTR_CMN_PAROBJID | ATTR_CMN_PARENTID)) || (al->dirattr & ATTR_DIR_MOUNTSTATUS);
+}
+
+static int needs_path(const struct xnu_attrlist* al, unsigned long options)
+{
+	return (al->commonattr & (ATTR_CMN_NAME | ATTR_CMN_FULLPATH)) ||
+		((options & FSOPT_ATTR_CMN_EXTENDED) && (al->forkattr & (ATTR_CMNEXT_RELPATH | ATTR_CMNEXT_NOFIRMLINKPATH)));
+}
+
+static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrlist* al, unsigned long options,
+	struct object* o)
 {
 	struct linux_stat* st = &o->st;
 	char linux_path[4096];
-	char* name;
-	int rv;
+	const char* fullpath = 0;
+	int rv, linked = 0;
 
 	rv = LINUX_SYSCALL(__NR_fstatat64, objfd, "", st, LINUX_AT_EMPTY_PATH | LINUX_AT_SYMLINK_NOFOLLOW);
 	if (rv < 0)
@@ -62,15 +83,40 @@ static long describe(int objfd, struct object* o)
 
 	// the object by a path that works for any file descriptor, even of a file that was since removed
 	__simple_sprintf(o->proc_path, "/proc/self/fd/%d", objfd);
+	o->parent = *st;
+	o->name[0] = '\0';
+
+	if (needs_parent(al) || needs_path(al, options))
+	{
+		rv = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, o->proc_path, linux_path, sizeof(linux_path) - 1);
+		linked = rv > 0 && linux_path[0] == '/';
+		if (linked)
+			linux_path[rv] = '\0';
+	}
+
+	if (needs_path(al, options))
+	{
+		// the path as the process sees it (inside the prefix), with every symlink resolved: what F_GETPATH returns.
+		// Without it (a path too long for the process), there's no full path, and the name is Linux's.
+		const char* from = 0;
+		if (fdpath(objfd, o->fullpath, sizeof(o->fullpath)) >= 0)
+			from = fullpath = o->fullpath;
+		else if (linked)
+			from = linux_path;
+		if (from)
+		{
+			const char* name = last_slash((char*) from);
+			name = (name && name[1]) ? name + 1 : from;
+			for (rv = 0; name[rv] && rv < (int) sizeof(o->name) - 1; rv++)
+				o->name[rv] = name[rv];
+			o->name[rv] = '\0';
+		}
+	}
 
 	// the directory it's in; a file system's root, or a removed file, stands in for its own
-	o->parent = *st;
-	rv = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, o->proc_path, linux_path, sizeof(linux_path) - 1);
-	if (rv > 0 && linux_path[0] == '/')
+	if (needs_parent(al) && linked)
 	{
-		char* slash;
-		linux_path[rv] = '\0';
-		slash = last_slash(linux_path);
+		char* slash = last_slash(linux_path);
 		if (slash == linux_path)
 			slash++;
 		*slash = '\0';
@@ -78,22 +124,15 @@ static long describe(int objfd, struct object* o)
 			o->parent = *st;
 	}
 
-	// the path as the process sees it (inside the prefix), with every symlink resolved: what F_GETPATH returns
-	rv = fdpath(objfd, o->fullpath, sizeof(o->fullpath));
-	if (rv < 0)
-		return errno_linux_to_bsd(rv);
-	name = last_slash(o->fullpath);
-	name = (name && name[1]) ? name + 1 : o->fullpath;
-
 	o->obj = (struct attrlist_object) { .st = st, .parent = &o->parent, .dirfd = LINUX_AT_FDCWD, .lookup = o->proc_path,
-		.name = name, .fullpath = o->fullpath };
+		.name = o->name, .fullpath = fullpath };
 	return 0;
 }
 
 static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out)
 {
 	struct object o;
-	long rv = describe(objfd, &o);
+	long rv = describe(objfd, alist, options, &o);
 
 	if (rv < 0)
 		return rv;
@@ -103,11 +142,12 @@ static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned lo
 	return attrlist_pack(alist, options, &o.obj, out);
 }
 
-// the volume the object open as objfd is on: its attributes, and the common ones of its root
-static long pack_volume(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out)
+// the volume the object open as objfd is on: its attributes, and the common ones of its root. Not inlined: its locals
+// are only on the stack of a call that asks for a volume.
+static __attribute__((noinline)) long pack_volume(int objfd, const struct xnu_attrlist* alist, unsigned long options,
+	char* out)
 {
 	struct bsd_statfs64 fs;
-	struct vchroot_expand_args vc;
 	struct object root;
 	const char* name;
 	long rv;
@@ -115,29 +155,19 @@ static long pack_volume(int objfd, const struct xnu_attrlist* alist, unsigned lo
 	rv = attrlist_check_volume(alist, options);
 	if (rv < 0)
 		return rv;
-	rv = sys_fstatfs64(objfd, &fs);
+	rv = mounts_fstatfs(objfd, &fs);
 	if (rv < 0)
 		return rv;
-	if (!fs.f_mntonname[0])
-		strcpy(fs.f_mntonname, "/");
 
-	vc.flags = VCHROOT_FOLLOW;
-	vc.dfd = LINUX_AT_FDCWD;
-	strcpy(vc.path, fs.f_mntonname);
-	rv = vchroot_expand(&vc);
-	if (rv < 0)
-		return rv;
-	int rootfd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, vc.path, LINUX_O_PATH | LINUX_O_CLOEXEC, 0);
+	int rootfd = mounts_open_root(&fs);
 	if (rootfd < 0)
-		return errno_linux_to_bsd(rootfd);
-	rv = describe(rootfd, &root);
+		return rootfd;
+	rv = describe(rootfd, alist, options, &root);
 	close_internal(rootfd);
 	if (rv < 0)
 		return rv;
 
-	// the root volume is named as a Mac's, which is where the iOS Simulator's file system is
-	name = last_slash(fs.f_mntonname);
-	name = (name && name[1]) ? name + 1 : "Macintosh HD";
+	name = mounts_volume_name(&fs);
 	root.obj.name = name;
 
 	struct attrlist_volume vol = { .fs = &fs, .name = name };
