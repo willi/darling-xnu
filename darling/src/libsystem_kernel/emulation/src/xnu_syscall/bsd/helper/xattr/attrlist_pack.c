@@ -65,6 +65,8 @@
 #define ATTR_CMNEXT_CLONEID 0x00000100
 #define ATTR_CMNEXT_EXT_FLAGS 0x00000200
 #define ATTR_CMNEXT_RECURSIVE_GENCOUNT 0x00000400
+#define ATTR_CMNEXT_ATTRIBUTION_TAG 0x00000800
+#define ATTR_CMNEXT_CLONE_REFCNT 0x00001000
 
 #define ATTR_VOL_FSTYPE 0x00000001
 #define ATTR_VOL_SIGNATURE 0x00000002
@@ -84,6 +86,11 @@
 #define ATTR_VOL_MOUNTEDDEVICE 0x00008000
 #define ATTR_VOL_ENCODINGSUSED 0x00010000
 #define ATTR_VOL_UUID 0x00040000
+#define ATTR_VOL_MOUNTEXTFLAGS 0x00080000
+#define ATTR_VOL_FSTYPENAME 0x00100000
+#define ATTR_VOL_FSSUBTYPE 0x00200000
+#define ATTR_VOL_OWNER 0x00400000
+#define ATTR_VOL_SPACEUSED 0x00800000
 #define ATTR_VOL_QUOTA_SIZE 0x10000000
 #define ATTR_VOL_RESERVED_SIZE 0x20000000
 #define ATTR_VOL_ATTRIBUTES 0x40000000
@@ -106,14 +113,14 @@
 #define VOL_CAPABILITIES_FORMAT_KNOWN 0x03ffffff
 #define VOL_CAPABILITIES_INTERFACES_KNOWN 0x003fffff
 
-// the bits XNU's attribute tables know; any other is EINVAL
+// the bits XNU's attribute tables know (xnu-12377, iOS 26's); any other is EINVAL
 #define DIR_KNOWN 0x0000003f
 #define FILE_KNOWN 0x0000363f
-#define CMNEXT_KNOWN 0x000007fc
+#define CMNEXT_KNOWN 0x00001ffc
 #define FORK_KNOWN 0x00000003
 // of a volume: the common attributes but the path, the added time, the protection class, and the two counters
 #define VOL_CMN_KNOWN 0xa7e7ffff
-#define VOL_KNOWN 0xf007ffff
+#define VOL_KNOWN 0xf0ffffff
 
 // what a volume has an answer for (ATTR_VOL_ATTRIBUTES)
 #define VOL_CMN_ANSWERED                                                                                               \
@@ -122,7 +129,8 @@
 	(ATTR_VOL_FSTYPE | ATTR_VOL_SIZE | ATTR_VOL_SPACEFREE | ATTR_VOL_SPACEAVAIL | ATTR_VOL_MINALLOCATION |             \
 		ATTR_VOL_ALLOCATIONCLUMP | ATTR_VOL_IOBLOCKSIZE | ATTR_VOL_OBJCOUNT | ATTR_VOL_MAXOBJCOUNT |                  \
 		ATTR_VOL_MOUNTPOINT | ATTR_VOL_NAME | ATTR_VOL_MOUNTFLAGS | ATTR_VOL_MOUNTEDDEVICE | ATTR_VOL_ENCODINGSUSED | \
-		ATTR_VOL_CAPABILITIES | ATTR_VOL_ATTRIBUTES | ATTR_VOL_INFO)
+		ATTR_VOL_CAPABILITIES | ATTR_VOL_ATTRIBUTES | ATTR_VOL_INFO | ATTR_VOL_MOUNTEXTFLAGS |                    \
+		ATTR_VOL_FSTYPENAME | ATTR_VOL_FSSUBTYPE | ATTR_VOL_OWNER | ATTR_VOL_SPACEUSED)
 
 #define DIR_MNTSTATUS_MNTPOINT 0x00000001
 #define VT_HFS 16
@@ -155,7 +163,7 @@ struct packer
 	{
 		int32_t* at;
 		const char* data;
-	} refs[6];
+	} refs[7];
 	int nrefs;
 };
 
@@ -452,6 +460,10 @@ uint32_t attrlist_pack(const struct xnu_attrlist* al, uint64_t options, const st
 		put_none(&p, sizeof(uint64_t));
 	if (x & ATTR_CMNEXT_RECURSIVE_GENCOUNT)
 		put_none(&p, sizeof(uint64_t));
+	if (x & ATTR_CMNEXT_ATTRIBUTION_TAG)
+		put_none(&p, sizeof(uint64_t));
+	if (x & ATTR_CMNEXT_CLONE_REFCNT)
+		put_none(&p, sizeof(uint32_t));
 
 	return finish(&p, out);
 }
@@ -503,6 +515,8 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 		put64(&p, VOL, ATTR_VOL_SPACEFREE, fs->f_bfree * bsize);
 	if (v & ATTR_VOL_SPACEAVAIL)
 		put64(&p, VOL, ATTR_VOL_SPACEAVAIL, fs->f_bavail * bsize);
+	if (v & ATTR_VOL_SPACEUSED)
+		put64(&p, VOL, ATTR_VOL_SPACEUSED, (fs->f_blocks - fs->f_bfree) * bsize);
 	if (v & ATTR_VOL_MINALLOCATION)
 		put64(&p, VOL, ATTR_VOL_MINALLOCATION, bsize);
 	if (v & ATTR_VOL_ALLOCATIONCLUMP)
@@ -542,6 +556,8 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 	}
 	if (v & ATTR_VOL_UUID)
 		put_none(&p, 16);
+	if (v & ATTR_VOL_MOUNTEXTFLAGS)
+		put32(&p, VOL, ATTR_VOL_MOUNTEXTFLAGS, 0);
 	if (v & ATTR_VOL_QUOTA_SIZE)
 		put_none(&p, sizeof(uint64_t));
 	if (v & ATTR_VOL_RESERVED_SIZE)
@@ -553,6 +569,14 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 		memcpy(attrs + ATTR_BIT_MAP_COUNT, attrs, ATTR_BIT_MAP_COUNT * sizeof(uint32_t));
 		put(&p, VOL, ATTR_VOL_ATTRIBUTES, attrs, sizeof(attrs));
 	}
+
+	// these come last, though their bits don't
+	if (v & ATTR_VOL_FSTYPENAME)
+		put_ref(&p, VOL, ATTR_VOL_FSTYPENAME, fs->f_fstypename);
+	if (v & ATTR_VOL_FSSUBTYPE)
+		put32(&p, VOL, ATTR_VOL_FSSUBTYPE, fs->f_fssubtype);
+	if (v & ATTR_VOL_OWNER)
+		put32(&p, VOL, ATTR_VOL_OWNER, fs->f_owner);
 
 	// ATTR_VOL_INFO only says volume attributes were asked for
 	return finish(&p, out);
