@@ -143,19 +143,35 @@ sysctl_handler(handle_argmax)
 	return 0;
 }
 
+#define LINUX_CLOCK_REALTIME 0
+#define LINUX_CLOCK_BOOTTIME 7
+
+// what /proc/stat's btime is, to the nanosecond: the wall clock less the time since boot
+static long long boot_time_ns(void)
+{
+	struct { long long tv_sec; long tv_nsec; } now, up;
+
+	if (LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_REALTIME, &now) < 0 ||
+		LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_BOOTTIME, &up) < 0)
+		return -1;
+	return (now.tv_sec - up.tv_sec) * 1000000000LL + (now.tv_nsec - up.tv_nsec);
+}
+
 // when the system booted, in seconds since the epoch: Linux's own answer (btime in /proc/stat), which, unlike the time
 // less the uptime (both in whole seconds, and changing at different moments), is the same every time it's asked.
-// CLOCK_MONOTONIC is the time of day less this, and went back and forth by a second. Read once: it doesn't change.
-static long long boot_time(void)
+// CLOCK_MONOTONIC is the time of day less this, and went back and forth by a second.
+long long sysctl_boot_time(void)
 {
 	static long long btime = -1;
 	static const char key[] = "\nbtime ";
 	char buf[1024];
 	unsigned int matched = 0;
-	long long value = 0;
+	long long value = 0, ns = boot_time_ns();
 	int fd, n, digits = 0;
 
-	if (btime >= 0)
+	// read once, so every call agrees; and again once the wall clock has been set, as Linux's answer then moves
+	// (the nanosecond answer is the cached second plus under one, give or take the time between the two clocks)
+	if (btime >= 0 && (ns < 0 || (ns / 1000000 - btime * 1000 > -1500 && ns / 1000000 - btime * 1000 < 2500)))
 		return btime;
 
 	fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, "/proc/stat", LINUX_O_RDONLY | LINUX_O_CLOEXEC, 0);
@@ -186,7 +202,7 @@ sysctl_handler(handle_boottime)
 {
 	// Fill in struct timeval { tv_sec, tv_usec }
 	struct bsd_timeval* tv;
-	long long btime = boot_time();
+	long long btime = sysctl_boot_time();
 
 	if (btime < 0)
 		return errno_linux_to_bsd(btime);

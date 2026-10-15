@@ -28,6 +28,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_kern.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
@@ -278,33 +279,10 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
 
 	uint64_t starttime = __simple_atoi(elem, NULL);
 
-	struct rdline_buffer rbuf;
-	int statfd = sys_open("/proc/stat", BSD_O_RDONLY, 0);
-
-	if (statfd < 0)
+	// the boot time kern.boottime gives, so a start time agrees with it
+	long long btime = sysctl_boot_time();
+	if (btime < 0)
 		return -ESRCH;
-
-	_readline_init(&rbuf);
-
-	uint64_t btime;
-	const char* line = NULL;
-
-	while ((line = _readline(statfd, &rbuf)) != NULL)
-	{
-		if (strncmp(line, "btime ", 6) == 0)
-		{
-			line += 6;
-			btime = __simple_atoi(line, NULL);
-			break;
-		}
-	}
-
-	close_internal(statfd);
-
-	// if we see `line == NULL`, we didn't break out early, so we didn't see "btime"
-	if (line == NULL) {
-		return -ESRCH;
-	}
 
 	long ticks_per_sec = native_sysconf(_SC_CLK_TCK);
 	uint64_t starttime_secs = starttime / ticks_per_sec;
