@@ -24,9 +24,10 @@ extern volatile int route_socket_count;
 // (bytes written, or a negative BSD errno); returns 1. Returns 0 for any other descriptor.
 int route_socket_write(int fd, const void* buf, unsigned long len, long* result);
 
-// The iovec flavour, for writev and sendmsg.
+// The iovec flavour, for writev and sendmsg; an iovcnt out of 1...UIO_MAXIOV fails with count_errno (writev's
+// EINVAL, sendmsg's EMSGSIZE).
 struct iovec;
-int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, long* result);
+int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, int count_errno, long* result);
 
 // The descriptor fd is being closed, or dup2() is about to replace it.
 void route_socket_close(int fd);

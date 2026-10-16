@@ -666,23 +666,84 @@ static long route_message(unsigned char* msg, unsigned long len, unsigned char* 
 	return err ? err : (long) len;
 }
 
-int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, long* result)
+// XNU's route_sendspace: a longer message fails with EMSGSIZE, as sosend() fails it
+#define ROUTE_MSG_MAX 8192
+#define LINUX_UIO_MAXIOV 1024
+
+// Copies from the process's own memory as the kernel would: a bad address fails with EFAULT instead of faulting here.
+static long read_self(struct iovec* local, unsigned long nlocal, const struct iovec* remote, unsigned long nremote)
 {
-	unsigned char msg[ROUTE_REPLY_MAX];
+	return LINUX_SYSCALL(__NR_process_vm_readv, LINUX_SYSCALL0(__NR_getpid), local, nlocal, remote, nremote, 0);
+}
+
+// Gathers the message that iov (iovcnt entries, validated by the caller) describes into msg; returns its length or a
+// negative BSD errno.
+static long route_copyin(const struct iovec* iov, int iovcnt, unsigned char* msg)
+{
+	struct iovec chunk[16];
+	unsigned long total = 0;
+	long ret;
+	int direct = 0; // process_vm_readv() refused (a seccomp filter, say): read the memory as it is
+
+	for (int i = 0; i < iovcnt; i += 16) {
+		int n = iovcnt - i < 16 ? iovcnt - i : 16;
+		struct iovec local = { chunk, n * sizeof(struct iovec) };
+		struct iovec remote = { (void*) (iov + i), n * sizeof(struct iovec) };
+
+		ret = direct ? -LINUX_ENOSYS : read_self(&local, 1, &remote, 1);
+		if (ret == -LINUX_ENOSYS || ret == -LINUX_EPERM) {
+			direct = 1;
+			memcpy(chunk, iov + i, n * sizeof(struct iovec));
+		} else if (ret != (long) local.iov_len) {
+			return -EFAULT;
+		}
+		for (int k = 0; k < n; k++) {
+			// the total must be a valid ssize_t, as XNU's uio_calculateresid() and Linux's import_iovec() require
+			if (chunk[k].iov_len > (unsigned long) __LONG_MAX__ - total)
+				return -EINVAL;
+			total += chunk[k].iov_len;
+		}
+	}
+	if (total > ROUTE_MSG_MAX)
+		return -EMSGSIZE;
+
+	struct iovec all = { msg, total };
+	if (!direct) {
+		ret = read_self(&all, 1, iov, iovcnt);
+		if (ret == -LINUX_ENOSYS || ret == -LINUX_EPERM)
+			direct = 1;
+		else if (ret != (long) total)
+			return -EFAULT;
+	}
+	if (direct) {
+		unsigned long off = 0;
+		for (int i = 0; i < iovcnt; i++) {
+			memcpy(msg + off, iov[i].iov_base, iov[i].iov_len);
+			off += iov[i].iov_len;
+		}
+	}
+	return total;
+}
+
+int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, int count_errno, long* result)
+{
+	unsigned char msg[ROUTE_MSG_MAX];
 	unsigned char answer[ROUTE_REPLY_MAX];
 	struct route_ref ref;
 	const void* reply;
-	unsigned long reply_len, len = 0;
+	unsigned long reply_len;
+	long len;
 
 	if (route_socket_ref(fd, &ref) < 0)
 		return 0;
-	for (int i = 0; i < iovcnt; i++) {
-		if (len + iov[i].iov_len > sizeof(msg)) {
-			*result = -EMSGSIZE;
-			return 1;
-		}
-		memcpy(msg + len, iov[i].iov_base, iov[i].iov_len);
-		len += iov[i].iov_len;
+	if (iovcnt <= 0 || iovcnt > LINUX_UIO_MAXIOV) {
+		*result = -count_errno;
+		return 1;
+	}
+	len = route_copyin(iov, iovcnt, msg);
+	if (len < 0) {
+		*result = len;
+		return 1;
 	}
 	*result = route_message(msg, len, answer, &reply, &reply_len);
 	if (reply_len)
@@ -693,5 +754,5 @@ int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, long* resul
 int route_socket_write(int fd, const void* buf, unsigned long len, long* result)
 {
 	struct iovec iov = { (void*) buf, len };
-	return route_socket_writev(fd, &iov, 1, result);
+	return route_socket_writev(fd, &iov, 1, EINVAL, result);
 }

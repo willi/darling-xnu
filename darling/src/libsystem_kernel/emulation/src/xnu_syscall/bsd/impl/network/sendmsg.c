@@ -28,7 +28,7 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 	struct bsd_sockaddr* xname;
 	long route_ret;
 
-	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(socket, msg->msg_iov, msg->msg_iovlen, &route_ret))
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(socket, msg->msg_iov, msg->msg_iovlen, EMSGSIZE, &route_ret))
 		return route_ret;
 
 	if (msg->msg_name != NULL && msg->msg_namelen > 0)
