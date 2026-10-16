@@ -7,6 +7,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 extern __SIZE_TYPE__ strlen(const char* src);
 extern char* strcpy(char* dest, const char* src);
@@ -16,6 +17,10 @@ long sys_getsockname(int fd, void* asa, int* socklen)
 {
 	int ret;
 	struct sockaddr_fixup* fixed;
+	long route_ret;
+
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_name(fd, 0, asa, socklen, &route_ret))
+		return route_ret;
 
 #ifdef __NR_socketcall
 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_GETSOCKNAME,

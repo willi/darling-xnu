@@ -12,6 +12,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/conversion/stat/common.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 #define XNU_F_GETPROTECTIONCLASS 63
 #define XNU_F_SETPROTECTIONCLASS 64
@@ -254,6 +255,8 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 		case F_DUPFD:
 		case F_DUPFD_CLOEXEC:
 			kqueue_dup(fd, ret);
+			if (ROUTE_SOCKET_ACTIVE())
+				route_socket_dup(fd, ret);
 			break;
 	}
 

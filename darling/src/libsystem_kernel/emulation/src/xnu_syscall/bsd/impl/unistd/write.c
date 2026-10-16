@@ -24,7 +24,7 @@ long sys_write_nocancel(int fd, const void* mem, int len)
 	int ret;
 	long route_ret;
 
-	if (ROUTE_SOCKET_ACTIVE() && route_socket_write(fd, mem, len, &route_ret))
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_write(fd, mem, len, 0, &route_ret))
 		return route_ret;
 
 	ret = LINUX_SYSCALL3(__NR_write, fd, mem, len);

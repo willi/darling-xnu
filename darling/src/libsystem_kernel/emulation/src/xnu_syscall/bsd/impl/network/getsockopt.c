@@ -8,11 +8,16 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/time/gettimeofday.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 {
 	int ret, linux_level, linux_optname;
-	
+	long route_ret;
+
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_sockopt(fd, 0, level, optname, optval, optlen, &route_ret))
+		return route_ret;
+
 	linux_level = level;
 	linux_optname = optname;
 	

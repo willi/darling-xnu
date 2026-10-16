@@ -10,6 +10,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/time/gettimeofday.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 #define LINGER_TICKS_PER_SEC	100 // Is this the right number of ticks per sec?
 
@@ -17,7 +18,11 @@ long sys_setsockopt(int fd, int level, int optname, const void* optval, int optl
 {
 	int ret, linux_level, linux_optname;
 	char buf[100];
-	
+	long route_ret;
+
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_sockopt(fd, 1, level, optname, (void*) optval, &optlen, &route_ret))
+		return route_ret;
+
 	linux_level = level;
 	linux_optname = optname;
 	

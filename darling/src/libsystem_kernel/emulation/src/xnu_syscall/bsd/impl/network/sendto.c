@@ -28,8 +28,7 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 	struct sockaddr_fixup* fixed = NULL;
 	long route_ret;
 
-	// a routing socket has no peer address: XNU's raw sockets ignore one
-	if (ROUTE_SOCKET_ACTIVE() && route_socket_write(fd, buffer, length, &route_ret))
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_write(fd, buffer, length, sockaddr != NULL, &route_ret))
 		return route_ret;
 
 	if (socklen > 512)

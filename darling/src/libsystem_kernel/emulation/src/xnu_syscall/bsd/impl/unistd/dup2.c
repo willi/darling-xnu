@@ -36,8 +36,11 @@ long sys_dup2(int fd_from, int fd_to)
 	#endif
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
-	else
+	else {
 		kqueue_dup(fd_from, fd_to);
+		if (ROUTE_SOCKET_ACTIVE())
+			route_socket_dup(fd_from, fd_to);
+	}
 
 	return ret;
 }

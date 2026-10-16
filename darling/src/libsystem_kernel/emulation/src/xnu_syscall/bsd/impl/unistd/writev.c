@@ -17,7 +17,7 @@ long sys_writev_nocancel(int fd, struct iovec* iovp, unsigned int len)
 	int ret;
 	long route_ret;
 
-	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(fd, iovp, len, EINVAL, &route_ret))
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(fd, iovp, len, 0, EINVAL, &route_ret))
 		return route_ret;
 
 	ret = LINUX_SYSCALL3(__NR_writev, fd, iovp, len);

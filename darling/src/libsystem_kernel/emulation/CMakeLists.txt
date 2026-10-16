@@ -121,7 +121,9 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
 	src/xnu_syscall/bsd/helper/network/duct.c
+	src/xnu_syscall/bsd/helper/network/ifinfo.c
 	src/xnu_syscall/bsd/helper/network/route.c
+	src/xnu_syscall/bsd/helper/network/rtnetlink.c
 
 	src/xnu_syscall/bsd/impl/audit/audit_addr.c
 	src/xnu_syscall/bsd/impl/audit/audit_session_join.c
