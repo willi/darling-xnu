@@ -49,6 +49,10 @@
 #define WQOPS_SET_EVENT_MANAGER_PRIORITY 0x80
 #define WQOPS_SETUP_DISPATCH 0x400
 
+#ifndef WQ_FLAG_THREAD_COOPERATIVE
+#define WQ_FLAG_THREAD_COOPERATIVE 0x01000000 /* thread is part of cooperative thread pool */
+#endif
+
 static int workq_sem = WQ_MAX_THREADS; // max 64 threads in use
 static libsimple_lock_t workq_parked_lock = LIBSIMPLE_LOCK_INITIALIZER;
 // static int workq_parked_threads = 0; // num spawned, but unused threads
@@ -281,12 +285,17 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 		case WQOPS_SET_EVENT_MANAGER_PRIORITY:
 		case WQOPS_QUEUE_NEWSPISUPP:
 			return 0;
-		case WQOPS_QUEUE_REQTHREADS2: // with prop bucket
+		case WQOPS_QUEUE_REQTHREADS2: // for the cooperative pool
 		case WQOPS_QUEUE_REQTHREADS:
 		{
 			// affinity contains thread count
 
 			int i, flags = extract_wq_flags(prio);
+
+			// as XNU's workq_reqthreads(): REQTHREADS2 asks for threads of libdispatch's cooperative pool (Swift
+			// concurrency's executor), which libpthread tells libdispatch so it drains that pool's root queue
+			if (options == WQOPS_QUEUE_REQTHREADS2)
+				flags = (flags & ~WQ_FLAG_THREAD_OVERCOMMIT) | WQ_FLAG_THREAD_COOPERATIVE;
 
 			// __simple_printf("Thread requested with prio %d\n", prio & WQ_FLAG_THREAD_PRIOMASK);
 
