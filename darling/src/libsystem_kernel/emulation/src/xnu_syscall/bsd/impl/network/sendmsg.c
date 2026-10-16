@@ -8,6 +8,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 extern void *malloc(__SIZE_TYPE__ size);
 extern void free(void* ptr);
@@ -25,6 +26,10 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 	struct linux_msghdr lmsg;
 	struct linux_cmsghdr* lchdr = NULL;
 	struct bsd_sockaddr* xname;
+	long route_ret;
+
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(socket, msg->msg_iov, msg->msg_iovlen, &route_ret))
+		return route_ret;
 
 	if (msg->msg_name != NULL && msg->msg_namelen > 0)
 	{

@@ -9,6 +9,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 
@@ -25,6 +26,11 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 	int ret, linux_flags, local_dgram;
 
 	struct sockaddr_fixup* fixed = NULL;
+	long route_ret;
+
+	// a routing socket has no peer address: XNU's raw sockets ignore one
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_write(fd, buffer, length, &route_ret))
+		return route_ret;
 
 	if (socklen > 512)
 		return -EINVAL;

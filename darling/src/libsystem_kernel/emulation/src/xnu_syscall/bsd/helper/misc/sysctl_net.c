@@ -11,10 +11,10 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ioctl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 extern void* memset(void* destination, int value, size_t length);
 extern void* memcpy(void* destination, const void* source, size_t n);
-extern size_t strnlen(const char* string, size_t max_length);
 extern char* strncpy(char* destination, const char* source, size_t length);
 extern size_t strlcpy(char* destination, const char* source, size_t size);
 
@@ -22,12 +22,11 @@ static sysctl_handler(handle_route);
 static int do_iflist(void* old, unsigned long* oldlen);
 
 #define LINUX_SIOCGIFCONF 0x8912
-#define LINUX_SIOCGIFHWADDR 0x8927
 #define LINUX_SIOCGIFBRDADDR 0x8919
 #define LINUX_SIOCGIFNETMASK 0x891b
+#define LINUX_SIOCGIFINDEX 0x8933
 #define LINUX_IFNAMSIZ 16
 
-#define MAC_LENGTH 6
 
 struct linux_sockaddr {
 	unsigned short sa_family;
@@ -112,19 +111,25 @@ static int do_iflist(void* old, unsigned long* oldlen) {
 
 	for (int i = 0; i < lifc.lifc_len; i += sizeof(struct linux_ifreq)) {
 		struct linux_ifreq* curr = &lifc.lifc_req[i / sizeof(struct linux_ifreq)];
-		size_t name_len = strnlen(curr->lifr_name, sizeof(curr->lifr_name));
-		size_t additional_sockaddr_len = name_len + MAC_LENGTH;
-		additional_sockaddr_len = (additional_sockaddr_len <= sizeof(((struct sockaddr_dl*)NULL)->sdl_data)) ? 0 : (additional_sockaddr_len - sizeof(((struct sockaddr_dl*)NULL)->sdl_data));
-		size_t ifm_length = sizeof(struct if_msghdr) + round_up_sizeof_u32(sizeof(struct sockaddr_dl) + additional_sockaddr_len);
+		struct linux_ifreq idx;
+		char dl_buf[128];
+		int dl_len;
+
+		// Linux's own interface index, as PF_ROUTE's RTM_GET reports it too
+		memcpy(idx.lifr_name, curr->lifr_name, sizeof(curr->lifr_name));
+		if ((status = __real_ioctl(tmp_sock, LINUX_SIOCGIFINDEX, &idx)) < 0)
+			goto out;
+		size_t iface_idx = idx.lifr_ifindex;
+
+		// its name, type and link-layer address
+		if ((status = dl_len = route_link_sockaddr(iface_idx, (struct sockaddr_dl*)dl_buf, sizeof(dl_buf))) < 0)
+			goto out;
+
+		size_t ifm_length = sizeof(struct if_msghdr) + round_up_sizeof_u32(dl_len);
 		size_t ifam_length = sizeof(struct ifa_msghdr) + round_up_sizeof_u32(sizeof(struct sockaddr)) * 3;
-		// technically not correct; SIOCGIFCONF could return the same interfaces in a different order on each call
-		// but this is enough for our purposes
-		size_t iface_idx = (i / sizeof(struct linux_ifreq)) + 1;
 
 		if (old && *oldlen >= total_len + ifm_length) {
 			struct if_msghdr* ifm = (void*)old_ptr;
-			struct sockaddr_dl* dl = (void*)(old_ptr + sizeof(struct if_msghdr));
-			struct linux_ifreq tmp;
 
 			memset(old_ptr, 0, ifm_length);
 
@@ -134,21 +139,7 @@ static int do_iflist(void* old, unsigned long* oldlen) {
 			ifm->ifm_version = RTM_VERSION;
 			ifm->ifm_addrs = RTA_IFP;
 
-			dl->sdl_len = sizeof(struct sockaddr_dl) + additional_sockaddr_len;
-			dl->sdl_family = AF_LINK;
-			dl->sdl_index = ifm->ifm_index;
-			/* dl->sdl_type = 0; */ // TODO: determine this somehow
-			dl->sdl_nlen = name_len;
-			dl->sdl_alen = MAC_LENGTH;
-			dl->sdl_slen = 0; // ???
-
-			memcpy(dl->sdl_data, curr->lifr_name, name_len);
-
-			// grab the MAC
-			memcpy(tmp.lifr_name, curr->lifr_name, sizeof(curr->lifr_name));
-			if ((status = __real_ioctl(tmp_sock, LINUX_SIOCGIFHWADDR, &tmp)) < 0)
-				goto out;
-			memcpy(LLADDR(dl), tmp.lifr_hwaddr.sa_data, MAC_LENGTH);
+			memcpy(old_ptr + sizeof(struct if_msghdr), dl_buf, dl_len);
 
 			old_ptr += ifm_length;
 		}

@@ -4,6 +4,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 long sys_writev(int fd, struct iovec* iovp, unsigned int len)
 {
@@ -14,6 +15,10 @@ long sys_writev(int fd, struct iovec* iovp, unsigned int len)
 long sys_writev_nocancel(int fd, struct iovec* iovp, unsigned int len)
 {
 	int ret;
+	long route_ret;
+
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(fd, iovp, len, &route_ret))
+		return route_ret;
 
 	ret = LINUX_SYSCALL3(__NR_writev, fd, iovp, len);
 	if (ret < 0)
