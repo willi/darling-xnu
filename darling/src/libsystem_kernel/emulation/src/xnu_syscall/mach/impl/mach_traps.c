@@ -846,6 +846,12 @@ kern_return_t mk_timer_arm_impl(mach_port_name_t name, uint64_t expire_time)
 	return code;
 }
 
+// The flags (MK_TIMER_CRITICAL) and the leeway only let the kernel coalesce timers; the timer fires at expire_time.
+kern_return_t mk_timer_arm_leeway_impl(mach_port_name_t name, uint64_t mk_timer_flags, uint64_t expire_time, uint64_t mk_timer_leeway)
+{
+	return mk_timer_arm_impl(name, expire_time);
+}
+
 kern_return_t mk_timer_cancel_impl(mach_port_name_t name, uint64_t *result_time)
 {
 	int code = dserver_rpc_mk_timer_cancel(name, result_time);
