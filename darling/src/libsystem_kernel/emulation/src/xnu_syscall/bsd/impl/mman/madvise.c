@@ -33,8 +33,13 @@ long sys_madvise(void* addr, unsigned long len, int advice)
 	// caller's range.
 	if (advice != MADV_DONTNEED) {
 		unsigned long start = (unsigned long) addr & ~(LINUX_PAGE_SIZE - 1);
-		if (len > 0)
-			len += (unsigned long) addr - start;
+		unsigned long off = (unsigned long) addr - start;
+		if (len > 0) {
+			// a range that wraps past the end of memory is invalid, as on Linux and XNU
+			if (len > ~0UL - off)
+				return -EINVAL;
+			len += off;
+		}
 		addr = (void*) start;
 	}
 
