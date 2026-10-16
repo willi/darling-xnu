@@ -10,13 +10,14 @@
 // so reading it, polling it, kqueue and FIONBIO behave as on a socket. Messages other than RTM_GET fail with EPERM
 // (the routes are Linux's), and no unsolicited messages (RTM_IFINFO, RTM_NEWADDR, ...) are ever sent.
 //
-// The answering end is per process: a copy of the descriptor made by dup() or inherited across exec() reads no
-// replies.
+// The answering end is per process (a forked child shares it): a copy of the descriptor made by dup() or inherited
+// across exec() reads no replies. It is a guarded descriptor, as darlingserver's are: the program can't close it or
+// dup2() over it.
 
 long route_socket_create(int type, int protocol);
 
 // route_socket_count is non-zero while the process has a routing socket open: the write paths check it before
-// looking a descriptor up, so other writes cost one load.
+// looking a descriptor up. The lookup takes no lock, so other descriptors' writes and closes never wait on one.
 extern volatile int route_socket_count;
 
 // If fd is a routing socket, handles the message in buf (len bytes) and stores the write's result in *result
@@ -27,8 +28,11 @@ int route_socket_write(int fd, const void* buf, unsigned long len, long* result)
 struct iovec;
 int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, long* result);
 
-// The descriptor fd is being closed.
+// The descriptor fd is being closed, or dup2() is about to replace it.
 void route_socket_close(int fd);
+
+// In the child of a fork, before it runs anything else.
+void route_atfork_child(void);
 
 // The interface a Linux interface index names, as Darwin describes it in RTA_IFP and NET_RT_IFLIST: a sockaddr_dl
 // with the interface's name, type and link-layer address. Returns its length, or a negative BSD errno.

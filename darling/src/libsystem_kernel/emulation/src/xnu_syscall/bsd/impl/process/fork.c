@@ -18,6 +18,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 #include <darlingserver/rpc.h>
 
@@ -104,6 +105,7 @@ long sys_fork_special_ports_locked(void)
 		workloop_atfork_child();
 		kqueue_atfork();
 		ulock_atfork_child();
+		route_atfork_child();
 #endif
 	}
 #ifndef VARIANT_DYLD

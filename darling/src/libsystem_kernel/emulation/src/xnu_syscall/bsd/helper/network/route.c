@@ -13,6 +13,8 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/duct_errno.h>
+#include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/conversion/network/duct.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
@@ -34,7 +36,6 @@ extern __SIZE_TYPE__ strnlen(const char* string, __SIZE_TYPE__ max_length);
 #define LINUX_SOL_SOCKET 1
 #define LINUX_SO_COOKIE 57
 #define LINUX_F_SETFD 2
-#define LINUX_FD_CLOEXEC 1
 
 #define LINUX_NLMSG_ERROR 2
 #define LINUX_NLM_F_REQUEST 1
@@ -151,14 +152,25 @@ static void linux_close(int fd)
 }
 
 // ---- the process's routing sockets
+//
+// The write and close paths look a descriptor up without the lock: each slot's fd is read atomically, and only a
+// match takes the lock (and re-checks), so writes and closes of other descriptors never touch it, and a signal
+// handler's write() or close() can't deadlock on it. Holding the lock blocks signals for the same reason, as
+// ulock_wait.c's table does.
+//
+// The answering end (peer) is the process's, not the program's: it's in the guard table, so the program's close()
+// leaves it alone and a dup2() over it is refused, and only forget_locked() closes it. A slot's generation changes
+// each time it's forgotten, so a reply prepared while the lock was released (across the netlink round trip) goes out
+// only if the slot still holds the same routing socket, through the same peer.
 
 #define MAX_ROUTE_SOCKETS 32
 
 struct route_socket {
-	int fd;                     // the process's end; -1: free
+	int fd;                     // the process's end; -1: free. Written under the lock, read without it.
 	int peer;                   // the answering end, where replies are sent from
 	unsigned long long cookie;  // Linux's SO_COOKIE of fd: the descriptor still being this socket
 	unsigned long long peer_cookie;
+	unsigned int generation;    // changes each time the slot is forgotten
 };
 
 static struct route_socket route_sockets[MAX_ROUTE_SOCKETS] = {
@@ -167,40 +179,83 @@ static struct route_socket route_sockets[MAX_ROUTE_SOCKETS] = {
 static libsimple_lock_t route_sockets_lock = LIBSIMPLE_LOCK_INITIALIZER;
 volatile int route_socket_count;
 
+#define LINUX_SIG_BLOCK 0
+#define LINUX_SIG_SETMASK 2
+
+static unsigned long long route_lock(void)
+{
+	unsigned long long all = ~0ull, old;
+
+	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_BLOCK, &all, &old, sizeof(all));
+	libsimple_lock_lock(&route_sockets_lock);
+	return old;
+}
+
+static void route_unlock(unsigned long long old)
+{
+	libsimple_lock_unlock(&route_sockets_lock);
+	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_SETMASK, &old, NULL, sizeof(old));
+}
+
+void route_atfork_child(void)
+{
+	// the child has only the forking thread: nobody holds the lock. Its routing sockets are the parent's (fork
+	// shares them), and so are their answering ends, which it keeps.
+	libsimple_lock_init(&route_sockets_lock);
+}
+
+// The slot that has fd, found without the lock; -1 if none.
+static int route_slot(int fd)
+{
+	for (int i = 0; i < MAX_ROUTE_SOCKETS; i++) {
+		if (__atomic_load_n(&route_sockets[i].fd, __ATOMIC_ACQUIRE) == fd)
+			return i;
+	}
+	return -1;
+}
+
+static int same_socket(int fd, unsigned long long cookie)
+{
+	unsigned long long now;
+	return linux_socket_cookie(fd, &now) == 0 && now == cookie;
+}
+
 static void forget_locked(struct route_socket* rs)
 {
-	unsigned long long cookie;
-
-	// unless the process closed it itself and the number is something else's now
-	if (linux_socket_cookie(rs->peer, &cookie) == 0 && cookie == rs->peer_cookie)
+	__atomic_store_n(&rs->fd, -1, __ATOMIC_RELEASE);
+	rs->generation++;
+	guard_table_remove(rs->peer);
+	// the guard kept the program from closing it; the cookie is a last check that the number is still ours
+	if (same_socket(rs->peer, rs->peer_cookie))
 		linux_close(rs->peer);
-	rs->fd = rs->peer = -1;
-	route_socket_count--;
+	rs->peer = -1;
+	__atomic_sub_fetch(&route_socket_count, 1, __ATOMIC_RELAXED);
 }
 
 long route_socket_create(int type, int protocol)
 {
 	int sv[2];
 	long ret;
-	unsigned long long cookie, peer_cookie;
+	unsigned long long cookie, peer_cookie, mask;
 
 	(void) protocol; // an address family to filter unsolicited messages by; none are sent
 	if (type != SOCK_RAW)
 		return -EPROTOTYPE;
 
+	// both ends close-on-exec from the start, so no exec on another thread can take the answering end along;
+	// the program's end then gets the BSD default back
 #ifdef __NR_socketcall
 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SOCKETPAIR,
-			((long[6]) { LINUX_AF_UNIX, LINUX_SOCK_DGRAM, 0, sv }));
+			((long[6]) { LINUX_AF_UNIX, LINUX_SOCK_DGRAM | LINUX_SOCK_CLOEXEC, 0, sv }));
 #else
-	ret = LINUX_SYSCALL(__NR_socketpair, LINUX_AF_UNIX, LINUX_SOCK_DGRAM, 0, sv);
+	ret = LINUX_SYSCALL(__NR_socketpair, LINUX_AF_UNIX, LINUX_SOCK_DGRAM | LINUX_SOCK_CLOEXEC, 0, sv);
 #endif
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
 
-	// the answering end stays with this process image
-	LINUX_SYSCALL(__NR_fcntl, sv[1], LINUX_F_SETFD, LINUX_FD_CLOEXEC);
-
-	ret = linux_socket_cookie(sv[0], &cookie);
+	ret = LINUX_SYSCALL(__NR_fcntl, sv[0], LINUX_F_SETFD, 0);
+	if (ret >= 0)
+		ret = linux_socket_cookie(sv[0], &cookie);
 	if (ret >= 0)
 		ret = linux_socket_cookie(sv[1], &peer_cookie);
 	if (ret < 0) {
@@ -208,22 +263,24 @@ long route_socket_create(int type, int protocol)
 		goto fail;
 	}
 
-	libsimple_lock_lock(&route_sockets_lock);
+	mask = route_lock();
 	ret = -ENOBUFS;
 	for (int i = 0; i < MAX_ROUTE_SOCKETS; i++) {
 		struct route_socket* rs = &route_sockets[i];
-		if (rs->fd == sv[0])
+		if (rs->fd == sv[0] || rs->fd == sv[1])
 			forget_locked(rs); // a stale entry: that descriptor was closed behind our back
 		if (rs->fd == -1 && ret < 0) {
-			rs->fd = sv[0];
+			if (guard_table_add(sv[1], guard_flag_prevent_close, NULL) < 0)
+				break;
 			rs->peer = sv[1];
 			rs->cookie = cookie;
 			rs->peer_cookie = peer_cookie;
-			route_socket_count++;
+			__atomic_add_fetch(&route_socket_count, 1, __ATOMIC_RELAXED);
+			__atomic_store_n(&rs->fd, sv[0], __ATOMIC_RELEASE);
 			ret = sv[0];
 		}
 	}
-	libsimple_lock_unlock(&route_sockets_lock);
+	route_unlock(mask);
 	if (ret >= 0)
 		return ret;
 
@@ -233,38 +290,61 @@ fail:
 	return ret;
 }
 
-// The answering end of fd, or -1 when fd isn't a routing socket (any more).
-static int route_socket_peer(int fd)
-{
-	int peer = -1;
-	unsigned long long cookie = 0;
+// A routing socket as a write found it: which slot, in which generation, answered through which peer.
+struct route_ref {
+	int slot;
+	unsigned int generation;
+	int peer;
+};
 
-	libsimple_lock_lock(&route_sockets_lock);
-	for (int i = 0; i < MAX_ROUTE_SOCKETS; i++) {
-		struct route_socket* rs = &route_sockets[i];
-		if (rs->fd != fd)
-			continue;
-		// a descriptor closed some other way (dup2 over it, say) and reused is no longer ours
-		if (linux_socket_cookie(fd, &cookie) < 0 || cookie != rs->cookie)
+// Looks fd up; returns 0 and fills ref if it's a routing socket, -1 if not (any more).
+static int route_socket_ref(int fd, struct route_ref* ref)
+{
+	int slot = route_slot(fd), found = -1;
+	unsigned long long mask;
+
+	if (slot < 0)
+		return -1;
+	mask = route_lock();
+	struct route_socket* rs = &route_sockets[slot];
+	if (rs->fd == fd) {
+		// a descriptor closed some other way and reused is no longer ours
+		if (!same_socket(fd, rs->cookie)) {
 			forget_locked(rs);
-		else
-			peer = rs->peer;
-		break;
+		} else {
+			ref->slot = slot;
+			ref->generation = rs->generation;
+			ref->peer = rs->peer;
+			found = 0;
+		}
 	}
-	libsimple_lock_unlock(&route_sockets_lock);
-	return peer;
+	route_unlock(mask);
+	return found;
+}
+
+// Queues reply on the routing socket ref names, unless it was closed (or its number reused) since it was looked up.
+static void route_socket_reply(const struct route_ref* ref, const void* reply, unsigned long len)
+{
+	unsigned long long mask = route_lock();
+	struct route_socket* rs = &route_sockets[ref->slot];
+
+	// a full receive queue drops the reply, as sbappendaddr() does
+	if (rs->fd >= 0 && rs->generation == ref->generation && rs->peer == ref->peer)
+		linux_sendto(ref->peer, reply, len, LINUX_MSG_DONTWAIT, NULL, 0);
+	route_unlock(mask);
 }
 
 void route_socket_close(int fd)
 {
-	libsimple_lock_lock(&route_sockets_lock);
-	for (int i = 0; i < MAX_ROUTE_SOCKETS; i++) {
-		if (route_sockets[i].fd == fd) {
-			forget_locked(&route_sockets[i]);
-			break;
-		}
-	}
-	libsimple_lock_unlock(&route_sockets_lock);
+	int slot = route_slot(fd);
+	unsigned long long mask;
+
+	if (slot < 0)
+		return;
+	mask = route_lock();
+	if (route_sockets[slot].fd == fd)
+		forget_locked(&route_sockets[slot]);
+	route_unlock(mask);
 }
 
 // ---- answering RTM_GET from Linux's routing table
@@ -528,16 +608,20 @@ static long answer_get(const struct rt_msghdr* req, const struct sockaddr* dst, 
 	return rtm->rtm_msglen;
 }
 
-static long route_message(int peer, const unsigned char* msg, unsigned long len)
+// Handles the routing message in msg (len bytes, the process's own copy) as XNU's route_output() does. Returns the
+// write's result (len, or a negative BSD errno) and points *reply at the message to queue for the sender (*reply_len
+// bytes; 0: none): the answer, built in answer, or on failure the request itself with rtm_errno set.
+static long route_message(unsigned char* msg, unsigned long len, unsigned char* answer, const void** reply,
+		unsigned long* reply_len)
 {
-	const struct rt_msghdr* req = (const void*) msg;
-	unsigned char reply[ROUTE_REPLY_MAX];
+	struct rt_msghdr* req = (void*) msg;
 	const struct sockaddr* dst = NULL;
 	long err = 0, rlen = -EINVAL;
 
-	// as route_output(): a message whose length is wrong is dropped; any other failure goes back to the sender with
-	// rtm_errno set, and the write fails with it
-	if (len < sizeof(*req) || req->rtm_msglen != len || len > sizeof(reply))
+	*reply_len = 0;
+	// a message whose length is wrong is dropped; any other failure goes back to the sender with rtm_errno set, and
+	// the write fails with it
+	if (len < sizeof(*req) || req->rtm_msglen != len)
 		return -EINVAL;
 
 	if (req->rtm_version != RTM_VERSION) {
@@ -560,42 +644,37 @@ static long route_message(int peer, const unsigned char* msg, unsigned long len)
 			p += ROUNDUP32(sa->sa_len);
 		}
 		if (dst != NULL)
-			rlen = answer_get(req, dst, reply);
+			rlen = answer_get(req, dst, answer);
 	}
 
+	struct rt_msghdr* rtm;
 	if (rlen < 0) {
 		err = rlen;
-		memcpy(reply, msg, len);
-		((struct rt_msghdr*) reply)->rtm_errno = -err;
-		rlen = len;
+		rtm = req;
+		rtm->rtm_errno = -err;
+		*reply = msg;
+		*reply_len = len;
+	} else {
+		rtm = (void*) answer;
+		*reply = answer;
+		*reply_len = rlen;
 	}
-	struct rt_msghdr* rtm = (void*) reply;
 	rtm->rtm_pid = sys_getpid();
 	if (rtm->rtm_type == RTM_GET_SILENT)
 		rtm->rtm_type = RTM_GET;
 
-	// a full receive queue drops the reply, as sbappendaddr() does
-	linux_sendto(peer, reply, rlen, LINUX_MSG_DONTWAIT, NULL, 0);
-
 	return err ? err : (long) len;
-}
-
-int route_socket_write(int fd, const void* buf, unsigned long len, long* result)
-{
-	int peer = route_socket_peer(fd);
-	if (peer < 0)
-		return 0;
-	*result = route_message(peer, buf, len);
-	return 1;
 }
 
 int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, long* result)
 {
 	unsigned char msg[ROUTE_REPLY_MAX];
-	unsigned long len = 0;
-	int peer = route_socket_peer(fd);
+	unsigned char answer[ROUTE_REPLY_MAX];
+	struct route_ref ref;
+	const void* reply;
+	unsigned long reply_len, len = 0;
 
-	if (peer < 0)
+	if (route_socket_ref(fd, &ref) < 0)
 		return 0;
 	for (int i = 0; i < iovcnt; i++) {
 		if (len + iov[i].iov_len > sizeof(msg)) {
@@ -605,6 +684,14 @@ int route_socket_writev(int fd, const struct iovec* iov, int iovcnt, long* resul
 		memcpy(msg + len, iov[i].iov_base, iov[i].iov_len);
 		len += iov[i].iov_len;
 	}
-	*result = route_message(peer, msg, len);
+	*result = route_message(msg, len, answer, &reply, &reply_len);
+	if (reply_len)
+		route_socket_reply(&ref, reply, reply_len);
 	return 1;
+}
+
+int route_socket_write(int fd, const void* buf, unsigned long len, long* result)
+{
+	struct iovec iov = { (void*) buf, len };
+	return route_socket_writev(fd, &iov, 1, result);
 }
