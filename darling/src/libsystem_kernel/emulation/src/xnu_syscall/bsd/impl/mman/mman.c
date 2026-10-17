@@ -82,8 +82,12 @@ long sys_mprotect(void* addr, unsigned long len, int prot)
 long sys_mincore(void* addr, unsigned long len, unsigned char* vec)
 {
 	int ret;
+	// as XNU: the pages the range touches, wherever in a page it starts (Linux wants it page-aligned). Apple's SQLite
+	// checks that a tokenizer's function pointers are mapped this way, and traps when it fails.
+	unsigned long start = (unsigned long) addr & ~4095ul;
+	unsigned long end = ((unsigned long) addr + len + 4095) & ~4095ul;
 
-	ret = LINUX_SYSCALL3(__NR_mincore, addr, len, vec);
+	ret = LINUX_SYSCALL3(__NR_mincore, start, end - start, vec);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 

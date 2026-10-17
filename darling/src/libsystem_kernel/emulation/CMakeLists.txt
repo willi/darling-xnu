@@ -107,7 +107,11 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/misc/common_at.c
 	src/xnu_syscall/bsd/helper/misc/executable.c
 	src/xnu_syscall/bsd/helper/misc/readline.c
+	src/xnu_syscall/bsd/helper/misc/sha256.c
 	src/xnu_syscall/bsd/helper/misc/fdpath.c
+	src/xnu_syscall/bsd/helper/misc/mounts.c
+	src/xnu_syscall/bsd/helper/xattr/attrlist_pack.c
+	src/xnu_syscall/bsd/helper/xattr/xattr_names.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -117,6 +121,12 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
 	src/xnu_syscall/bsd/helper/network/duct.c
+	src/xnu_syscall/bsd/helper/network/ifinfo.c
+	src/xnu_syscall/bsd/helper/network/route.c
+	src/xnu_syscall/bsd/helper/network/rtnetlink.c
+	src/xnu_syscall/bsd/helper/network/sostate.c
+	src/xnu_syscall/bsd/helper/network/sockutil.c
+	src/xnu_syscall/bsd/helper/network/nosigpipe.c
 
 	src/xnu_syscall/bsd/impl/audit/audit_addr.c
 	src/xnu_syscall/bsd/impl/audit/audit_session_join.c
@@ -300,6 +310,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/impl/unistd/readv.c
 	src/xnu_syscall/bsd/impl/unistd/rename.c
 	src/xnu_syscall/bsd/impl/unistd/renameat.c
+	src/xnu_syscall/bsd/impl/unistd/renameatx_np.c
 	src/xnu_syscall/bsd/impl/unistd/setegid.c
 	src/xnu_syscall/bsd/impl/unistd/seteuid.c
 	src/xnu_syscall/bsd/impl/unistd/setgid.c

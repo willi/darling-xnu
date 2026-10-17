@@ -59,6 +59,7 @@ void* __mach_syscall_table[128] = {
 	[92] = mk_timer_destroy_impl,
 	[93] = mk_timer_arm_impl,
 	[94] = mk_timer_cancel_impl,
+	[95] = mk_timer_arm_leeway_impl,
 };
 
 extern void __simple_printf(const char* format, ...);

@@ -20,5 +20,10 @@ long sys_psynch_rw_wrlock(void* rwlock, uint32_t lgenval, uint32_t ugenval, uint
 		__simple_abort();
 	}
 
-	return (ret) ? ret : retval;
+	// the server answers XNU's error (positive, with psynch's ECVCLEARED/ECVPREPOST bits in it) as the result code: an
+	// error here, as XNU returns it with the carry flag set. Returned as a result, libpthread took a timed-out wait's
+	// 316 (ECVCLEARED | ETIMEDOUT) for the wait's sequence bits, its condition variable's words drifted, and a later
+	// wait failed with EINVAL (std's Condvar::wait_timeout asserts on that, and aborted backboardd). Both as long: the
+	// conditional of an int and a uint32_t is unsigned, which would make the error a large result again.
+	return (ret) ? (long) -ret : (long) retval;
 }

@@ -9,6 +9,7 @@
 #include <darling/emulation/conversion/network/socket.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 
 long sys_socket(int domain, int type, int protocol)
 {
@@ -25,6 +26,8 @@ long sys_socket(int domain, int type, int protocol)
 			linux_domain = LINUX_PF_IPX; break;
 		case PF_INET6:
 			linux_domain = LINUX_PF_INET6; break;
+		case PF_ROUTE:
+			return route_socket_create(type, protocol);
 		default:
 			return -EINVAL;
 	}

@@ -64,6 +64,7 @@ kern_return_t task_name_for_pid_impl(mach_port_name_t target_tport, int pid, mac
 mach_port_name_t task_self_trap_impl(void);
 
 kern_return_t mk_timer_arm_impl(mach_port_name_t name, uint64_t expire_time);
+kern_return_t mk_timer_arm_leeway_impl(mach_port_name_t name, uint64_t mk_timer_flags, uint64_t expire_time, uint64_t mk_timer_leeway);
 kern_return_t mk_timer_cancel_impl(mach_port_name_t name, uint64_t *result_time);
 kern_return_t mk_timer_destroy_impl(mach_port_name_t name);
 mach_port_name_t mk_timer_create_impl(void);

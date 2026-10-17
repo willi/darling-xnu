@@ -2,43 +2,177 @@
 #include <sys/errno.h>
 
 #include <darling/emulation/common/base.h>
-#include <darling/emulation/conversion/dirent/getdirentries.h>
+#include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/conversion/common_at.h>
+#include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/dirent/getdirentries.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/unistd/dup.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 
-#define ATTR_BIT_MAP_COUNT 5
+// getattrlist(), fgetattrlist() and getattrlistat(): the attributes of an object, or of the volume it is on, packed as
+// attrlist_pack.h says.
 
-#define COMMON_SUPPORTED (ATTR_CMN_FNDRINFO | ATTR_CMN_OBJTAG)
-#define VOLUME_SUPPORTED 0
-#define DIR_SUPPORTED (ATTR_DIR_ENTRYCOUNT)
-#define FILE_SUPPORTED (ATTR_FILE_RSRCLENGTH)
-#define FORK_SUPPORTED 0
+#ifndef __NR_fstatat64
+#	define __NR_fstatat64 __NR_newfstatat
+#endif
 
-#define ATTR_CMN_FNDRINFO 0x4000
-#define ATTR_FILE_RSRCLENGTH 0x1000
-#define ATTR_CMN_OBJTAG 0x00000010
-#define ATTR_DIR_ENTRYCOUNT 0x00000002
-
-#define XATTR_FINDER_INFO "com.apple.FinderInfo"
-#define XATTR_RESOURCE_FORK "com.apple.ResourceFork"
-
-#define FSOPT_NOFOLLOW 1
-#define FSOPT_REPORT_FULLSIZE 4
-
-#define VT_HFS 16
+#define LINUX_O_PATH 010000000
+#define LINUX_S_IFMT 0170000
+#define LINUX_S_IFDIR 0040000
+#define XNU_MAXPATHLEN 1024
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern void *memset(void *s, int c, __SIZE_TYPE__ n);
 extern char *strcpy(char *dest, const char *src);
+
+static char* last_slash(char* s)
+{
+	char* last = 0;
+	for (; *s; s++)
+		if (*s == '/')
+			last = s;
+	return last;
+}
+
+// what's known of the object open as objfd, without following it if it's a symlink
+struct object
+{
+	struct linux_stat st, parent;
+	char proc_path[32], fullpath[XNU_MAXPATHLEN], name[256];
+	struct attrlist_object obj;
+};
+
+#define ATTR_CMN_PAROBJID 0x00000080
+#define ATTR_CMN_FULLPATH 0x08000000
+#define ATTR_CMN_PARENTID 0x40000000
+#define ATTR_DIR_MOUNTSTATUS 0x00000004
+#define ATTR_CMNEXT_RELPATH 0x00000004
+#define ATTR_CMNEXT_NOFIRMLINKPATH 0x00000020
+
+// the directory it's in and its path are only looked up for the attributes that need them: they cost path walks, and
+// a path can be too long for the process to be given
+static int needs_parent(const struct xnu_attrlist* al)
+{
+	return (al->commonattr & (ATTR_CMN_PAROBJID | ATTR_CMN_PARENTID)) || (al->dirattr & ATTR_DIR_MOUNTSTATUS);
+}
+
+static int needs_path(const struct xnu_attrlist* al, unsigned long options)
+{
+	return (al->commonattr & (ATTR_CMN_NAME | ATTR_CMN_FULLPATH)) ||
+		((options & FSOPT_ATTR_CMN_EXTENDED) && (al->forkattr & (ATTR_CMNEXT_RELPATH | ATTR_CMNEXT_NOFIRMLINKPATH)));
+}
+
+static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrlist* al, unsigned long options,
+	struct object* o)
+{
+	struct linux_stat* st = &o->st;
+	char linux_path[4096];
+	const char* fullpath = 0;
+	int rv, linked = 0;
+
+	rv = LINUX_SYSCALL(__NR_fstatat64, objfd, "", st, LINUX_AT_EMPTY_PATH | LINUX_AT_SYMLINK_NOFOLLOW);
+	if (rv < 0)
+		return errno_linux_to_bsd(rv);
+
+	// the object by a path that works for any file descriptor, even of a file that was since removed
+	__simple_sprintf(o->proc_path, "/proc/self/fd/%d", objfd);
+	o->parent = *st;
+	o->name[0] = '\0';
+
+	if (needs_parent(al) || needs_path(al, options))
+	{
+		rv = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, o->proc_path, linux_path, sizeof(linux_path) - 1);
+		linked = rv > 0 && linux_path[0] == '/';
+		if (linked)
+			linux_path[rv] = '\0';
+	}
+
+	if (needs_path(al, options))
+	{
+		// the path as the process sees it (inside the prefix), with every symlink resolved: what F_GETPATH returns.
+		// Without it (a path too long for the process), there's no full path, and the name is Linux's.
+		const char* from = 0;
+		if (fdpath(objfd, o->fullpath, sizeof(o->fullpath)) >= 0)
+			from = fullpath = o->fullpath;
+		else if (linked)
+			from = linux_path;
+		if (from)
+		{
+			const char* name = last_slash((char*) from);
+			name = (name && name[1]) ? name + 1 : from;
+			for (rv = 0; name[rv] && rv < (int) sizeof(o->name) - 1; rv++)
+				o->name[rv] = name[rv];
+			o->name[rv] = '\0';
+		}
+	}
+
+	// the directory it's in; a file system's root, or a removed file, stands in for its own
+	if (needs_parent(al) && linked)
+	{
+		char* slash = last_slash(linux_path);
+		if (slash == linux_path)
+			slash++;
+		*slash = '\0';
+		if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, linux_path, &o->parent, 0) < 0)
+			o->parent = *st;
+	}
+
+	o->obj = (struct attrlist_object) { .st = st, .parent = &o->parent, .dirfd = LINUX_AT_FDCWD, .lookup = o->proc_path,
+		.name = o->name, .fullpath = fullpath };
+	return 0;
+}
+
+static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out)
+{
+	struct object o;
+	long rv = describe(objfd, alist, options, &o);
+
+	if (rv < 0)
+		return rv;
+	rv = attrlist_check(alist, options, (o.st.st_mode & LINUX_S_IFMT) == LINUX_S_IFDIR);
+	if (rv < 0)
+		return rv;
+	return attrlist_pack(alist, options, &o.obj, out);
+}
+
+// the volume the object open as objfd is on: its attributes, and the common ones of its root. Not inlined: its locals
+// are only on the stack of a call that asks for a volume.
+static __attribute__((noinline)) long pack_volume(int objfd, const struct xnu_attrlist* alist, unsigned long options,
+	char* out)
+{
+	struct bsd_statfs64 fs;
+	struct object root;
+	const char* name;
+	long rv;
+
+	rv = attrlist_check_volume(alist, options);
+	if (rv < 0)
+		return rv;
+	rv = mounts_fstatfs(objfd, &fs);
+	if (rv < 0)
+		return rv;
+
+	int rootfd = mounts_open_root(&fs);
+	if (rootfd < 0)
+		return rootfd;
+	rv = describe(rootfd, alist, options, &root);
+	close_internal(rootfd);
+	if (rv < 0)
+		return rv;
+
+	name = mounts_volume_name(&fs);
+	root.obj.name = name;
+
+	struct attrlist_volume vol = { .fs = &fs, .name = name };
+	return attrlist_pack_volume(alist, options, &root.obj, &vol, out);
+}
 
 long
 FUNC_NAME(int fd,
@@ -49,12 +183,14 @@ const char* path,
 
 struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, unsigned long options)
 {
-	int rv;
-	char *ourBuffer, *next;
-	__SIZE_TYPE__ spaceNeeded = 4; // 4 bytes for the length header
+	long rv;
+	char out[ATTRLIST_PACK_MAX];
+	uint32_t size;
 
 	if (!alist)
 		return -EFAULT;
+	if (alist->bitmapcount != ATTR_BIT_MAP_COUNT)
+		return -EINVAL;
 
 #if HAS_PATH
 	if (!path)
@@ -66,116 +202,34 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 
 	strcpy(vc.path, path);
 	rv = vchroot_expand(&vc);
-	
+
 	if (rv < 0)
 		return rv;
 #endif
 
-	if (alist->bitmapcount < ATTR_BIT_MAP_COUNT)
-		return -EINVAL;
-
-	if ((alist->commonattr & COMMON_SUPPORTED) != alist->commonattr)
-		return -EINVAL;
-	if ((alist->volattr & VOLUME_SUPPORTED) != alist->volattr)
-		return -EINVAL;
-	if ((alist->dirattr & DIR_SUPPORTED) != alist->dirattr)
-		return -EINVAL;
-	if ((alist->fileattr & FILE_SUPPORTED) != alist->fileattr)
-		return -EINVAL;
-	if ((alist->forkattr & FORK_SUPPORTED) != alist->forkattr)
-		return -EINVAL;
-
-	if (alist->commonattr & ATTR_CMN_FNDRINFO)
-		spaceNeeded += 32;
-	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
-		spaceNeeded += 8; // off_t
-	if (alist->commonattr & ATTR_CMN_OBJTAG)
-		spaceNeeded += sizeof(uint32_t); // fsobj_tag_t
-	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT)
-		spaceNeeded += sizeof(uint32_t);
-
-	ourBuffer = (char*) __builtin_alloca(spaceNeeded);
-	next = ourBuffer + 4;
-
-	if (alist->commonattr & ATTR_CMN_FNDRINFO)
 	{
 #if HAS_PATH
-		rv = LINUX_SYSCALL(__NR_getxattr, vc.path, XATTR_FINDER_INFO, next, 32);
+		int objfd = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path,
+				LINUX_O_PATH | LINUX_O_CLOEXEC | ((options & FSOPT_NOFOLLOW) ? LINUX_O_NOFOLLOW : 0), 0);
+		if (objfd < 0)
+			return errno_linux_to_bsd(objfd);
 #else
-		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, next, 32);
+		int objfd = fd;
+#endif
+		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, alist, options, out);
+#if HAS_PATH
+		close_internal(objfd);
 #endif
 		if (rv < 0)
-			memset(next, 0, 32);
-		next += 32;
-	}
-	if (alist->fileattr & ATTR_FILE_RSRCLENGTH)
-	{
-#if HAS_PATH
-		rv = LINUX_SYSCALL(__NR_getxattr, vc.path, XATTR_FINDER_INFO, NULL, 0);
-#else
-		rv = LINUX_SYSCALL(__NR_fgetxattr, fd, XATTR_FINDER_INFO, NULL, 0);
-#endif
-		if (rv < 0)
-			*((uint32_t*) next) = 0;
-		else
-			*((uint32_t*) next) = rv;
-		next += 4;
+			return rv;
+		size = rv;
 	}
 
-	if (alist->commonattr & ATTR_CMN_OBJTAG) {
-		// pretend we're always on HFS
-		*((uint32_t*)next) = VT_HFS;
-		next += 4;
-	}
+	// as XNU: the length is of what was returned, or with FSOPT_REPORT_FULLSIZE of everything asked for (so the caller
+	// can size its buffer)
+	uint32_t length = (options & FSOPT_REPORT_FULLSIZE) ? size : min(bufferSize, size);
+	memcpy(out, &length, sizeof(length));
+	memcpy(attributeBuffer, out, min(bufferSize, size));
 
-	if (alist->dirattr & ATTR_DIR_ENTRYCOUNT) {
-		char buf[1024]; // maybe this should be smaller?
-		int tmp_fd;
-
-		*((uint32_t*)next) = 0;
-
-#if HAS_PATH
-		tmp_fd = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, LINUX_O_RDONLY | LINUX_O_DIRECTORY, 0);
-		if (tmp_fd < 0) {
-			rv = -EIO; // translate all errors into EIO (to avoid confusing our caller)
-			goto attr_dir_entrycount_out_no_fd;
-		}
-#else
-		// dupe it to avoid advancing the internal `getdents` position if our caller is using that
-		tmp_fd = sys_dup(fd);
-		if (tmp_fd < 0) {
-			rv = -EIO; // see above
-			goto attr_dir_entrycount_out_no_fd;
-		}
-#endif
-
-		while (1) {
-			// there's basically no other way to do this (at least none that either i or the internet know of)
-			rv = LINUX_SYSCALL(__NR_getdents64, tmp_fd, buf, sizeof(buf));
-			if (rv < 0) {
-				rv = -EIO; // same as before: avoid confusing our caller with unexepected errnos
-				goto attr_dir_entrycount_out;
-			} else if (rv == 0) {
-				break;
-			}
-
-			for (char* iter = buf; iter < buf + rv; iter += ((struct linux_dirent64*)iter)->d_reclen) {
-				++(*((uint32_t*)next));
-			}
-		}
-
-attr_dir_entrycount_out:
-		close_internal(tmp_fd);
-attr_dir_entrycount_out_no_fd:
-		next += 4;
-	}
-
-	if (!(options & FSOPT_REPORT_FULLSIZE) && bufferSize < spaceNeeded)
-		bufferSize = spaceNeeded;
-
-	*((uint32_t*) ourBuffer) = bufferSize;
-
-	memcpy(attributeBuffer, ourBuffer, min(bufferSize, spaceNeeded));
-	
 	return 0;
 }

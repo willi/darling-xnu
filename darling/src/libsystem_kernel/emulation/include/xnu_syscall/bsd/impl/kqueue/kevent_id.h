@@ -10,6 +10,8 @@ long sys_kevent_id(uint64_t id, const struct kevent_qos_s* changelist, int nchan
 		struct kevent_qos_s* eventlist, int nevents,
 		void* data_out, unsigned long* data_available, unsigned int flags);
 
+long sys_kqueue_workloop_ctl(uint64_t cmd, uint64_t options, const void* addr, unsigned long sz);
+
 // WQOPS_THREAD_WORKLOOP_RETURN, from the thread servicing a workloop
 void __attribute__((noreturn)) workloop_servicer_return(const struct kevent_qos_s* changelist, int nchanges);
 

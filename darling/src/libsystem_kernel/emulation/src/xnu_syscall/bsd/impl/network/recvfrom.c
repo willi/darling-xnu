@@ -8,6 +8,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/network/socket.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
@@ -29,9 +30,9 @@ long sys_recvfrom_nocancel(int fd, void* buf, unsigned long len,
 
 #ifdef __NR_socketcall
 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_RECVFROM, ((long[6]) { fd, buf, len,
-			flags, from, socklen }));
+			linux_flags, from, socklen }));
 #else
-	ret = LINUX_SYSCALL(__NR_recvfrom, fd, buf, len, flags, from, socklen);
+	ret = LINUX_SYSCALL(__NR_recvfrom, fd, buf, len, linux_flags, from, socklen);
 #endif
 
 	if (ret < 0)
@@ -42,6 +43,10 @@ long sys_recvfrom_nocancel(int fd, void* buf, unsigned long len,
 		if ((*socklen = sockaddr_fixup_from_linux(fixed, from, *socklen)) < 0)
 			ret = *socklen;
 	}
+
+	// the error XNU's soreceive() would return (sostate.h)
+	if (ret <= 0 && SOCKET_RECV_HOOKED(ret))
+		ret = socket_error_read(fd, ret, flags & BSD_MSG_PEEK, 1);
 
 	return ret;
 }

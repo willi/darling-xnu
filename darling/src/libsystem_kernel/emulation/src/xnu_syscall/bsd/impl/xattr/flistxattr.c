@@ -6,18 +6,25 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/conversion/stat/common.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/common_at.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
 #ifdef __NR_fstat64
 	#define STAT_CALL __NR_fstat64
 #else
 	#define STAT_CALL __NR_fstat
 #endif
-#ifndef MAXPATHLEN
-#	define MAXPATHLEN 1024
-#endif
+
+static long list_fd(long fd, char* buf, unsigned long size)
+{
+	return LINUX_SYSCALL(__NR_flistxattr, (int) fd, buf, size);
+}
+
+static long list_link(long path, char* buf, unsigned long size)
+{
+	return LINUX_SYSCALL(__NR_llistxattr, (const char*) path, buf, size);
+}
 
 long sys_flistxattr(int fd, char* namebuf, unsigned long size, int options)
 {
@@ -42,13 +49,8 @@ long sys_flistxattr(int fd, char* namebuf, unsigned long size, int options)
 		if (ret < 0)
 			return errno_linux_to_bsd(ret);
 		path[ret] = '\0';
-		ret = LINUX_SYSCALL(__NR_llistxattr, path, namebuf, size);
-	} else {
-		ret = LINUX_SYSCALL(__NR_flistxattr, fd, namebuf, size);
+		return xattr_list(list_link, (long) path, namebuf, size);
 	}
 
-	if (ret < 0)
-		return errno_linux_to_bsd(ret);
-
-	return ret;
+	return xattr_list(list_fd, fd, namebuf, size);
 }

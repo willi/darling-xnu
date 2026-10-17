@@ -8,11 +8,17 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern __SIZE_TYPE__ strlen(const char* src);
 extern char* strcpy(char* dest, const char* src);
 extern char *strncpy(char *dest, const char *src, __SIZE_TYPE__ n);
+
+// libkqueue's, when it's there (for-libkqueue.h)
+__attribute__((weak))
+__attribute__((visibility("default")))
+void kqueue_socket_changed(int fd) {}
 
 // Must be included after strncpy
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
@@ -46,6 +52,10 @@ long sys_connect_nocancel(int fd, const void* name, int socklen)
 
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
+
+	// connected, or failed; a connect still in progress changes nothing yet
+	if (ret != -EINPROGRESS && ret != -EALREADY)
+		SOCKET_CHANGED(fd);
 
 	return ret;
 }

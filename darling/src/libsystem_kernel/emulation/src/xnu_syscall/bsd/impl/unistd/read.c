@@ -3,6 +3,7 @@
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/linux_premigration/misc/ioctl.h>
 #include <darling/emulation/conversion/duct_errno.h>
@@ -31,8 +32,12 @@ long sys_read_nocancel(int fd, void* mem, int len)
 			if (__real_ioctl(fd, LINUX_TCGETA, dummy) == 0) // "isatty(fd)"
 				return 0;
 		}
-		return errno_linux_to_bsd(ret);
+		ret = errno_linux_to_bsd(ret);
 	}
+
+	// on a socket, the error XNU's soreceive() would return (sostate.h)
+	if (ret <= 0 && SOCKET_READ_HOOKED(ret))
+		ret = socket_error_read(fd, ret, 0, socket_watchers != 0);
 
 	return ret;
 }

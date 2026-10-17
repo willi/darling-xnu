@@ -16,6 +16,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/bsdthread_create.h>
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/ext/futex.h>
 #include <darling/emulation/common/simple.h>
@@ -47,6 +48,10 @@
 #define WQOPS_QUEUE_REQTHREADS2    0x30
 #define WQOPS_SET_EVENT_MANAGER_PRIORITY 0x80
 #define WQOPS_SETUP_DISPATCH 0x400
+
+#ifndef WQ_FLAG_THREAD_COOPERATIVE
+#define WQ_FLAG_THREAD_COOPERATIVE 0x01000000 /* thread is part of cooperative thread pool */
+#endif
 
 static int workq_sem = WQ_MAX_THREADS; // max 64 threads in use
 static libsimple_lock_t workq_parked_lock = LIBSIMPLE_LOCK_INITIALIZER;
@@ -280,12 +285,17 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 		case WQOPS_SET_EVENT_MANAGER_PRIORITY:
 		case WQOPS_QUEUE_NEWSPISUPP:
 			return 0;
-		case WQOPS_QUEUE_REQTHREADS2: // with prop bucket
+		case WQOPS_QUEUE_REQTHREADS2: // for the cooperative pool
 		case WQOPS_QUEUE_REQTHREADS:
 		{
 			// affinity contains thread count
 
 			int i, flags = extract_wq_flags(prio);
+
+			// as XNU's workq_reqthreads(): REQTHREADS2 asks for threads of libdispatch's cooperative pool (Swift
+			// concurrency's executor), which libpthread tells libdispatch so it drains that pool's root queue
+			if (options == WQOPS_QUEUE_REQTHREADS2)
+				flags = (flags & ~WQ_FLAG_THREAD_OVERCOMMIT) | WQ_FLAG_THREAD_COOPERATIVE;
 
 			// __simple_printf("Thread requested with prio %d\n", prio & WQ_FLAG_THREAD_PRIOMASK);
 
@@ -354,36 +364,39 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 #endif
 }
 
+// A counting semaphore on a futex: `*sem` is the count, never below 0. Takes one, waiting up to `timeout` seconds for it
+// (-1: for ever); answers 0 when it timed out.
+//
+// It was the count gone negative for waiters, and the waiter stored -1 over it before its futex wait: a sem_up() between
+// the decrement and that store was lost, so a parked thread woken for a request timed out instead, removed itself from
+// the parked list a second time (its waker had already) and left the list pointing into its stack; when the thread was
+// gone, the next park wrote into the dead stack (runningboardd segfaulted in workq_thread_park), and the request it was
+// woken for was dropped. Any futex error also counted as a timeout, a signal or a changed value among them.
 int sem_down(int* sem, int timeout)
 {
-	int result;
 	struct timespec ts = { timeout, 0 };
 
-try_again:
-	result = __sync_add_and_fetch(sem, -1);
-	if (result < 0)
+	for (;;)
 	{
-		*sem = -1;
-		result = __linux_futex(sem, FUTEX_WAIT, -1, (timeout != -1) ? &ts : NULL, 0, 0);
+		int count = __atomic_load_n(sem, __ATOMIC_ACQUIRE);
+		if (count > 0)
+		{
+			if (__atomic_compare_exchange_n(sem, &count, count - 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+				return 1;
+			continue;
+		}
 
-		if (result == -1)
+		// a signal or a sem_up() before the wait (the count is not 0 any more) ends it early: look again
+		int result = LINUX_SYSCALL(__NR_futex, sem, FUTEX_WAIT, 0, (timeout != -1) ? &ts : NULL, NULL, 0);
+		if (result == -LINUX_ETIMEDOUT)
 			return 0;
-
-		goto try_again;
 	}
-
-	return 1;
 }
 
 void sem_up(int* sem)
 {
-	int result;
-	result = __sync_add_and_fetch(sem, 1);
-	if (result == 0)
-	{
-		*sem = 1;
-		__linux_futex(sem, FUTEX_WAKE, 1, NULL, 0, 0);
-	}
+	__atomic_add_fetch(sem, 1, __ATOMIC_RELEASE);
+	LINUX_SYSCALL(__NR_futex, sem, FUTEX_WAKE, 1, NULL, NULL, 0);
 }
 
 #define __PTHREAD_PRIORITY_CBIT_USER_INTERACTIVE 0x20

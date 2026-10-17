@@ -7,6 +7,8 @@
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/common/guarded/table.h>
+#include <darling/emulation/linux_premigration/ext/for-libkqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 __attribute__((weak))
 __attribute__((visibility("default")))
@@ -37,6 +39,8 @@ long sys_close_nocancel(int fd)
 		// this FD belongs to libkqueue and it will take care of closing it
 		return 0;
 	}
+
+	socket_tables_close(fd);
 
 	ret = LINUX_SYSCALL1(__NR_close, fd);
 	if (ret < 0)

@@ -8,6 +8,8 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 extern void *malloc(__SIZE_TYPE__ size);
 extern void free(void* ptr);
@@ -25,6 +27,11 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 	struct linux_msghdr lmsg;
 	struct linux_cmsghdr* lchdr = NULL;
 	struct bsd_sockaddr* xname;
+	long route_ret;
+
+	if (ROUTE_SOCKET_ACTIVE() && route_socket_writev(socket, msg->msg_iov, msg->msg_iovlen, msg->msg_name != NULL, EMSGSIZE,
+			&route_ret))
+		return route_ret;
 
 	if (msg->msg_name != NULL && msg->msg_namelen > 0)
 	{
@@ -74,7 +81,7 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 
 	lmsg.msg_flags = 0; // ignored
 
-	linux_flags = local_dgram_send_flags(socket, msgflags_bsd_to_linux(flags), &local_dgram);
+	linux_flags = local_dgram_send_flags(socket, msgflags_bsd_to_linux(flags) | LINUX_MSG_NOSIGNAL, &local_dgram);
 
 #ifdef __NR_socketcall
 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDMSG,
@@ -84,8 +91,11 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 #endif
 
 	ret = local_dgram_send_result(local_dgram, ret);
-	if (ret < 0)
+	if (ret < 0) {
 		ret = errno_linux_to_bsd(ret);
+		// XNU's error, and its SIGPIPE: Linux raised none (socktables.h)
+		ret = socket_send_failed(socket, ret, flags & BSD_MSG_NOSIGNAL, 0);
+	}
 
 	if (lchdr != NULL)
 		free(lchdr);

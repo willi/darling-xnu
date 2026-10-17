@@ -37,6 +37,11 @@ int __dserver_get_process_lifetime_pipe(void);
 int __dserver_process_lifetime_pipe_refresh(void);
 void __dserver_close_process_lifetime_pipe(int fd);
 
+// mldr's fork handlers (see elfcalls.h)
+void __darling_fork_prepare(void);
+void __darling_fork_parent(void);
+void __darling_fork_child(void);
+
 CPP_EXTERN_END
 
 #endif // _ELFCALLS_WRAPPER_H

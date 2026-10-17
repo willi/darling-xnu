@@ -28,11 +28,14 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_kern.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
 
 #include <darlingserver/rpc.h>
+#include <mach-o/loader.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
 
 #define LINUX_PR_SET_NAME 15
 
@@ -128,6 +131,7 @@ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer
 static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, int32_t buffer_size);
@@ -182,6 +186,10 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		case PROC_PIDLISTTHREADS:
 		{
 			return _proc_pidinfo_listthreads(pid, buffer, bufsize);
+		}
+		case PROC_PIDPLATFORMINFO:
+		{
+			return _proc_pidinfo_platforminfo(pid, buffer, bufsize);
 		}
 		default:
 		{
@@ -271,33 +279,10 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
 
 	uint64_t starttime = __simple_atoi(elem, NULL);
 
-	struct rdline_buffer rbuf;
-	int statfd = sys_open("/proc/stat", BSD_O_RDONLY, 0);
-
-	if (statfd < 0)
+	// the boot time kern.boottime gives, so a start time agrees with it
+	long long btime = sysctl_boot_time();
+	if (btime < 0)
 		return -ESRCH;
-
-	_readline_init(&rbuf);
-
-	uint64_t btime;
-	const char* line = NULL;
-
-	while ((line = _readline(statfd, &rbuf)) != NULL)
-	{
-		if (strncmp(line, "btime ", 6) == 0)
-		{
-			line += 6;
-			btime = __simple_atoi(line, NULL);
-			break;
-		}
-	}
-
-	close_internal(statfd);
-
-	// if we see `line == NULL`, we didn't break out early, so we didn't see "btime"
-	if (line == NULL) {
-		return -ESRCH;
-	}
 
 	long ticks_per_sec = native_sysconf(_SC_CLK_TCK);
 	uint64_t starttime_secs = starttime / ticks_per_sec;
@@ -805,4 +790,54 @@ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize
 bail:
 	close_internal(fd);
 	return count * sizeof(uint64_t);
+}
+
+// The platform the process's executable was built for (a PLATFORM_* value), as XNU records it at exec: from
+// LC_BUILD_VERSION, else from an LC_VERSION_MIN_* command, else 0. The calling process's own is read once: its
+// executable can't change without an exec, which starts over with fresh memory.
+static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize)
+{
+	static uint32_t self_platform; // the platform + 1; 0 until it's known
+	static const struct { uint32_t cmd, platform; } version_min[] = {
+		{ LC_VERSION_MIN_MACOSX, PLATFORM_MACOS },
+		{ LC_VERSION_MIN_IPHONEOS, PLATFORM_IOS },
+		{ LC_VERSION_MIN_TVOS, PLATFORM_TVOS },
+		{ LC_VERSION_MIN_WATCHOS, PLATFORM_WATCHOS },
+	};
+	struct build_version_command bv;
+	struct version_min_command vm;
+	uint32_t platform = 0;
+	uint64_t base;
+	long ret;
+	int fd, i;
+
+	if (bufsize < (int32_t) sizeof(platform))
+		return -ENOMEM;
+	if (pid == sys_getpid() && (platform = __atomic_load_n(&self_platform, __ATOMIC_RELAXED)) != 0)
+	{
+		platform--;
+		memcpy(buffer, &platform, sizeof(platform));
+		return sizeof(platform);
+	}
+
+	fd = executable_open(pid);
+	if (fd < 0)
+		return errno_linux_to_bsd(fd);
+	ret = executable_find_load_command(fd, LC_BUILD_VERSION, &bv, sizeof(bv), &base);
+	if (ret > 0)
+		platform = bv.platform;
+	for (i = 0; ret == 0 && i < (int) (sizeof(version_min) / sizeof(version_min[0])); i++)
+	{
+		ret = executable_find_load_command(fd, version_min[i].cmd, &vm, sizeof(vm), &base);
+		if (ret > 0)
+			platform = version_min[i].platform;
+	}
+	LINUX_SYSCALL1(__NR_close, fd);
+	if (ret < 0)
+		return errno_linux_to_bsd(ret);
+
+	if (pid == sys_getpid())
+		__atomic_store_n(&self_platform, platform + 1, __ATOMIC_RELAXED);
+	memcpy(buffer, &platform, sizeof(platform));
+	return sizeof(platform);
 }

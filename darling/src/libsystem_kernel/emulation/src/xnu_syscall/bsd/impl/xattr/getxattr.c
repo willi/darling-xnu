@@ -2,37 +2,33 @@
 
 #include <sys/errno.h>
 
-extern char* strcpy(char* dst, const char* src);
-
 #include <darling/emulation/common/base.h>
-#include <darling/emulation/conversion/errno.h>
-#include <darling/emulation/conversion/xattr/getxattr.h>
-#include <darling/emulation/linux_premigration/vchroot_expand.h>
-#include <darling/emulation/common/bsdthread/per_thread_wd.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
 long sys_getxattr(const char* path, const char* name, char* value,
 		unsigned long size, unsigned int pos, int options)
 {
-	int ret;
+	char linux_name[XATTR_LINUX_NAME_MAX];
+	struct vchroot_expand_args vc;
+	long ret;
 
 	if (pos != 0)
 		return -ERANGE;
-
-	struct vchroot_expand_args vc;
-	vc.flags = (options & XATTR_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
-	vc.dfd = get_perthread_wd();
-
-	strcpy(vc.path, path);
-	ret = vchroot_expand(&vc);
-
+	ret = xattr_linux_name(name, linux_name);
 	if (ret < 0)
-		return errno_linux_to_bsd(ret);
-
-	ret = LINUX_SYSCALL(__NR_getxattr, vc.path, name, value, size);
-
+		return ret;
+	ret = xattr_path(path, options, &vc);
 	if (ret < 0)
-		return errno_linux_to_bsd(ret);
+		return ret;
 
-	return 0;
+	// as XNU: without a buffer, the size of the value
+	if (!value)
+		size = 0;
+	if (options & XATTR_NOFOLLOW)
+		ret = LINUX_SYSCALL(__NR_lgetxattr, vc.path, linux_name, value, size);
+	else
+		ret = LINUX_SYSCALL(__NR_getxattr, vc.path, linux_name, value, size);
+
+	return ret < 0 ? xattr_errno(ret) : ret;
 }

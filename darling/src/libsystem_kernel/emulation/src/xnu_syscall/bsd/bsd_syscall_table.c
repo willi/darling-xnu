@@ -180,6 +180,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/readv.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/rename.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/renameat.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/unistd/renameatx_np.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/setegid.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/seteuid.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/setgid.h>
@@ -486,12 +487,14 @@ void* __bsd_syscall_table[600] = {
 	[476] = sys_getattrlistat,
 	[478] = sys_bsdthread_ctl,
 	[483] = sys_csrctl,
+	[488] = sys_renameatx_np,
 	[500] = sys_getentropy,
 	[515] = sys_ulock_wait,
 	[516] = sys_ulock_wake,
 	[517] = sys_fclonefileat,
 	[521] = sys_abort_with_payload,
 	[524] = sys_setattrlistat,
+	[530] = sys_kqueue_workloop_ctl,
 	[553] = sys_mkfifoat,
 	[554] = sys_mknodat,
 };

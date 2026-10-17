@@ -3,6 +3,8 @@
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/linux_premigration/ext/for-libkqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 __attribute__((weak))
 __attribute__((visibility("default")))
@@ -15,8 +17,10 @@ long sys_dup(int fd)
 	ret = LINUX_SYSCALL1(__NR_dup, fd);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
-	else
+	else {
 		kqueue_dup(fd, ret);
+		socket_tables_dup(fd, ret);
+	}
 
 	return ret;
 }
