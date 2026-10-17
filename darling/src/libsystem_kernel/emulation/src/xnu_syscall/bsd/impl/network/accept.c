@@ -1,5 +1,6 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/network/accept.h>
 
+#include <stddef.h>
 #include <sys/fcntl.h>
 
 #include <darling/emulation/common/base.h>
@@ -34,9 +35,13 @@ long sys_accept_nocancel(int fd, void* from, int* socklen)
 		ret = errno_linux_to_bsd(ret);
 	else
 	{
-		fixed = (struct sockaddr_fixup*) from;
-		fixed->bsd_family = sfamily_linux_to_bsd(fixed->linux_family);
-		fixed->bsd_length = *socklen;
+		// the peer's address is optional, as on XNU: accept(fd, NULL, NULL)
+		if (from != NULL)
+		{
+			fixed = (struct sockaddr_fixup*) from;
+			fixed->bsd_family = sfamily_linux_to_bsd(fixed->linux_family);
+			fixed->bsd_length = *socklen;
+		}
 
 		// on macOS (and BSD), accept-ed sockets inherit O_NONBLOCK
 		int parent_flags = sys_fcntl_nocancel(fd, F_GETFL, 0);
