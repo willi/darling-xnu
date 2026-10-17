@@ -10,6 +10,7 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/fcntl/fcntl.h>
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
@@ -39,6 +40,11 @@ static inline bool istext(char c)
 }
 
 long sys_execve(const char* fname, const char** argvp, const char** envp)
+{
+	return sys_execve_spawn(fname, argvp, envp, -1);
+}
+
+long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, int spawn_fd)
 {
 	int ret;
 	struct vchroot_expand_args vc;
@@ -188,11 +194,13 @@ long sys_execve(const char* fname, const char** argvp, const char** envp)
 
 		char mldr_lifetime_pipe_env[32] = { '\0' };
 		__simple_snprintf(mldr_lifetime_pipe_env, sizeof(mldr_lifetime_pipe_env) - 1, "__mldr_lifetime_pipe=%d", __dserver_get_process_lifetime_pipe());
+		char mldr_spawn_pipe_env[32] = { '\0' };
+		__simple_snprintf(mldr_spawn_pipe_env, sizeof(mldr_spawn_pipe_env) - 1, "__mldr_spawn_pipe=%d", spawn_fd);
 
 		// count original env vars
 		while (envp[len++]);
 
-		const int new_env_count = 2;
+		const int new_env_count = spawn_fd >= 0 ? 3 : 2;
 
 		// allocate a new envp and env0, env1
 		modenvp = (const char**)__builtin_alloca(sizeof(void*) * (len + new_env_count));
@@ -203,6 +211,8 @@ long sys_execve(const char* fname, const char** argvp, const char** envp)
 		strcat(buf, server_socket_path);
 		modenvp[0] = buf;
 		modenvp[1] = mldr_lifetime_pipe_env;
+		if (spawn_fd >= 0)
+			modenvp[2] = mldr_spawn_pipe_env;
 
 		// append original env vars
 		for (int i = new_env_count; i < len + new_env_count; i++)
@@ -244,9 +254,17 @@ long sys_execve(const char* fname, const char** argvp, const char** envp)
 	// let xtrace inject itself into the execve, if necessary
 	_xtrace_execve_inject(&envp);
 
+	// mldr takes posix_spawn()'s pipe across the exec
+	bool pass_spawn_fd = spawn_fd >= 0 && (is_script || is_macho);
+	if (pass_spawn_fd)
+		LINUX_SYSCALL(__NR_fcntl, spawn_fd, LINUX_F_SETFD, 0);
+
 	ret = LINUX_SYSCALL(__NR_execve, path_to_exec, argvp, envp);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
+
+	if (pass_spawn_fd)
+		LINUX_SYSCALL(__NR_fcntl, spawn_fd, LINUX_F_SETFD, LINUX_FD_CLOEXEC);
 
 	// the execve failed; write to the write end of the pipe.
 	// ignore errors.

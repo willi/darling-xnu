@@ -566,7 +566,8 @@ no_fork:
 			envp = new_envp;
 		}
 
-		ret = sys_execve((char*) path, argvp, envp);
+		// the no-fork case has no pipe (-1): its caller is the process that execs
+		ret = sys_execve_spawn((char*) path, (const char**) argvp, (const char**) envp, pipe[1]);
 fail:
 		//__simple_kprintf("posix_spawn is failing with %d\n", ret);
 		if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
@@ -615,9 +616,18 @@ fail:
 		if (pid != NULL)
 			*pid = my_pid;
 
-		if (sys_read(pipe[0], &ret, sizeof(ret)) != sizeof(ret))
+		// XNU's posix_spawn() returns once the new image is activated, or with the error that failed it. The pipe closes
+		// when mldr has activated a Darling executable (or at the exec of anything else), and has the error otherwise.
+		long got;
+		while ((got = sys_read_nocancel(pipe[0], &ret, sizeof(ret))) == -EINTR)
+			;
+		if (got != sizeof(ret))
 			ret = 0;
 		close_internal(pipe[0]);
+
+		// a failed spawn leaves no process on XNU: reap the child that reported it
+		if (ret < 0)
+			LINUX_SYSCALL(__NR_wait4, my_pid, NULL, 0, NULL);
 	}
 
 out:

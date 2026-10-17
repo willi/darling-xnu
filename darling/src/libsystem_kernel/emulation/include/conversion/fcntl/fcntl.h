@@ -23,6 +23,9 @@ enum {
 	LINUX_F_DUPFD_CLOEXEC = 1030,
 };
 
+// F_GETFD/F_SETFD's flag
+#define LINUX_FD_CLOEXEC 1
+
 // enum {
 // 	F_DUPFD = 0,
 // 	F_GETFD,
