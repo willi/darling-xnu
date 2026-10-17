@@ -100,12 +100,3 @@ int path_same_mount(const char* a, const char* b)
 		return ret < 0 ? ret : 1;
 	return ida == idb;
 }
-
-int linux_real_uid(void)
-{
-#ifdef __NR_getuid32
-	return LINUX_SYSCALL(__NR_getuid32);
-#else
-	return LINUX_SYSCALL(__NR_getuid);
-#endif
-}

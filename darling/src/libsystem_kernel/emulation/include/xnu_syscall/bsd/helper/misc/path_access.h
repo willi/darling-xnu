@@ -23,7 +23,4 @@ int path_parent(const char* path, char* out);
 // for files. Before Linux 5.8 (no STATX_MNT_ID) it can't be told, and the answer is 1.
 int path_same_mount(const char* a, const char* b);
 
-// The Linux process's real uid, which Linux checks permissions as for access()
-int linux_real_uid(void);
-
 #endif // _PATH_ACCESS_H

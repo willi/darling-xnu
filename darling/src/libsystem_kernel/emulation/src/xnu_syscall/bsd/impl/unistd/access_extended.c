@@ -9,6 +9,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/path_access.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getuid.h>
 
 extern char* strcpy(char* dst, const char* src);
 extern __SIZE_TYPE__ strlen(const char* str);
