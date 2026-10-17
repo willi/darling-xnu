@@ -33,8 +33,10 @@ struct iovec;
 int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, long* result);
 
 // A send on fd returned ret (bytes, or a negative BSD errno) after the socket error paths (sostate.h). If it's EPIPE
-// and neither the send (msg_nosignal: BSD MSG_NOSIGNAL) nor the socket asked for none, raises SIGPIPE in this thread,
+// and neither the send (msg_nosignal: BSD MSG_NOSIGNAL) nor the socket asked for none, raises SIGPIPE,
 // unless Linux did already (linux_raised: the call went to Linux without MSG_NOSIGNAL and Linux returned EPIPE).
+// As XNU's psignal() does, it goes to the process, where a thread not blocking it takes it. (Linux's own SIGPIPE,
+// for the write() of a descriptor without SO_NOSIGPIPE, goes to the sending thread.)
 long socket_send_done(int fd, long ret, int msg_nosignal, int linux_raised);
 
 // The descriptor fd is being closed, or dup2() is about to replace it.

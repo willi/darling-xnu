@@ -188,9 +188,8 @@ long socket_send_done(int fd, long ret, int msg_nosignal, int linux_raised)
 	if (NOSIGPIPE_ACTIVE() && linux_socket_cookie(fd, &cookie) == 0 && socket_flagged(fd, cookie))
 		return ret;
 
-	// XNU's psignal(); Linux sends its own SIGPIPE to the sending thread
-	long pid = LINUX_SYSCALL0(__NR_getpid), tid = LINUX_SYSCALL0(__NR_gettid);
-	LINUX_SYSCALL(__NR_tgkill, pid, tid, LINUX_SIGPIPE);
+	// XNU's psignal(p, SIGPIPE): to the process
+	LINUX_SYSCALL(__NR_kill, LINUX_SYSCALL0(__NR_getpid), LINUX_SIGPIPE);
 	return ret;
 }
 
