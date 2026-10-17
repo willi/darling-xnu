@@ -16,6 +16,7 @@
 #	define LINUX_ENOENT ENOENT
 #	define LINUX_ELOOP ELOOP
 #	define LINUX_ENAMETOOLONG ENAMETOOLONG
+#	define LINUX_EBADF EBADF
 
 #	define LINUX_S_IFMT S_IFMT
 #	define LINUX_S_IFLNK S_IFLNK
@@ -206,6 +207,9 @@ int vchroot_expand(struct vchroot_expand_args* args)
 #ifndef TEST
 			__simple_printf("    dfd %d -> err %d!\n", args->dfd, rv);
 #endif
+			// a descriptor that isn't open has no /proc/self/fd entry; namei() answers EBADF for it
+			if (rv == -LINUX_ENOENT && args->dfd != -100)
+				return -LINUX_EBADF;
 			return rv;
 		}
 		
