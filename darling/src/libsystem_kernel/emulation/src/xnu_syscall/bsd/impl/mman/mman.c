@@ -4,6 +4,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 
 static int prot_bsd_to_linux(int prot)
 {
@@ -24,6 +25,8 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
 	int linux_prot;
 	int linux_flags = 0;
 	void* ret;
+	unsigned long long mask;
+	bool locked;
 
 	linux_prot = prot_bsd_to_linux(prot);
 
@@ -40,6 +43,9 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
 	// if (flags & MAP_STACK)
 	// 	linux_flags |= LINUX_MAP_STACK;
 
+	// what was mapped there goes
+	locked = (flags & MAP_FIXED) && purgeable_unmap_begin((uintptr_t) start, len, &mask);
+
 #ifdef __NR_mmap2
 #ifdef __i386__
 	linux_flags |= LINUX_MAP_32BIT;
@@ -49,6 +55,7 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
 	ret = (void*) LINUX_SYSCALL6(__NR_mmap, start, len, linux_prot, linux_flags, fd, pos);
 #endif
 
+	purgeable_unmap_end(locked, mask, (unsigned long) ret <= (unsigned long) -4096, (uintptr_t) start, len);
 	if ((unsigned long)ret > (unsigned long) -4096)
 		ret = (void*)(long) errno_linux_to_bsd((int) ret);
 
@@ -58,8 +65,11 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
 long sys_munmap(void* addr, unsigned long len)
 {
 	int ret;
+	unsigned long long mask;
+	bool locked = purgeable_unmap_begin((uintptr_t) addr, len, &mask);
 
 	ret = LINUX_SYSCALL2(__NR_munmap, addr, len);
+	purgeable_unmap_end(locked, mask, ret == 0, (uintptr_t) addr, len);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 
