@@ -1,4 +1,5 @@
 #include <mach/kern_return.h>
+#include <mach/message.h>
 
 #include <darling/emulation/xnu_syscall/mach/impl/mach_time.h>
 #include <darling/emulation/xnu_syscall/mach/impl/mach_traps.h>
@@ -65,8 +66,13 @@ void* __mach_syscall_table[128] = {
 };
 
 extern void __simple_printf(const char* format, ...);
+
+// A trap the table has no function for. MACH_SEND_INVALID_DEST is what XNU's port-taking traps return when the
+// trap can't serve a call, and what libsyscall's wrappers (mach_port.c, mach_vm.c, host.c) take to send the MIG
+// message instead, which darlingserver may handle; any other result goes back to the caller as the answer.
+// (A number XNU itself has no trap for, kern_invalid in its table, raises EXC_SYSCALL there.)
 long __unknown_mach_syscall(int nr, ...)
 {
 	__simple_printf("Unimplemented mach trap (%d)\n", nr);
-	return KERN_FAILURE;
+	return MACH_SEND_INVALID_DEST;
 }
