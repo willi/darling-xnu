@@ -15,8 +15,6 @@
 #	define __NR_fstatat64 __NR_newfstatat
 #endif
 
-#define LINUX_S_IFMT 0170000
-#define LINUX_S_IFDIR 0040000
 #define LINUX_O_PATH 010000000
 #define LINUX_STATX_MNT_ID 0x00001000U
 // struct statx's offsets: stx_mask, stx_dev_major and stx_dev_minor, stx_mnt_id

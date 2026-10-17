@@ -141,11 +141,24 @@ struct linux_statfs64
 	long f_spare[4];
 };
 
+// st_mode's file types and the sticky bit, as Linux's stat() reports them
+#define LINUX_S_IFMT 0170000
+#define LINUX_S_IFSOCK 0140000
+#define LINUX_S_IFLNK 0120000
+#define LINUX_S_IFREG 0100000
+#define LINUX_S_IFBLK 0060000
+#define LINUX_S_IFDIR 0040000
+#define LINUX_S_IFCHR 0020000
+#define LINUX_S_IFIFO 0010000
+#define LINUX_S_ISVTX 01000
+
 struct stat;
 struct stat64;
 
 void stat_linux_to_bsd(const struct linux_stat* lstat, struct stat* stat);
 void stat_linux_to_bsd64(const struct linux_stat* lstat, struct stat64* stat);
 void statfs_linux_to_bsd64(const struct linux_statfs64* lstat, struct bsd_statfs64* stat);
+// Linux statfs()'s f_flags (statvfs(3)'s ST_* bits) as XNU's MNT_* ones; none when Linux doesn't say (no ST_VALID)
+unsigned int statfs_flags_linux_to_bsd(long lflags);
 
 #endif // LINUX_STAT_COMMON_H

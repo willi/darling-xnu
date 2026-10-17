@@ -6,11 +6,6 @@
 
 #include <darling/emulation/conversion/stat/common.h>
 
-#define LINUX_S_IFMT 0170000
-#define LINUX_S_IFDIR 0040000
-#define LINUX_S_IFREG 0100000
-#define LINUX_S_IFLNK 0120000
-#define LINUX_S_ISVTX 01000
 
 // stat(), following a symbolic link at the end unless nofollow
 int path_stat(const char* path, struct linux_stat* st, int nofollow);

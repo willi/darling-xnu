@@ -5,6 +5,7 @@
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/dirent/getdirentries.h>
 #include <darling/emulation/conversion/fcntl/open.h>
+#include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
@@ -140,8 +141,6 @@
 #define LINUX_W_OK 2
 #define LINUX_X_OK 1
 
-#define LINUX_S_IFMT 0170000
-#define LINUX_S_IFDIR 0040000
 
 // fsobj_type_t
 enum { VNON, VREG, VDIR, VBLK, VCHR, VLNK, VSOCK, VFIFO };

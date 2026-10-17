@@ -10,7 +10,6 @@
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/other/mach/lkm.h>
 
-#define LINUX_S_IFIFO 0010000
 
 long sys_mkfifo(const char* path, unsigned int mode)
 {

@@ -63,9 +63,6 @@ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern void* memmove(void* dest, const void* src, __SIZE_TYPE__ n);
 extern int memcmp(const void* dest, const void* src, __SIZE_TYPE__ n);
 
-#define LINUX_S_IFMT 00170000
-#define LINUX_S_IFLNK 0120000
-
 #define __simple_printf(...)
 // #define __simple_printf __simple_kprintf // For bug hunting
 
