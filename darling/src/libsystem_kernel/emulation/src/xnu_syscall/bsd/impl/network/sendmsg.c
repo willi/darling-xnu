@@ -9,6 +9,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 
 extern void *malloc(__SIZE_TYPE__ size);
@@ -93,8 +94,8 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 	ret = local_dgram_send_result(local_dgram, ret);
 	if (ret < 0) {
 		ret = errno_linux_to_bsd(ret);
-		// XNU's SIGPIPE: Linux raised none (nosigpipe.h)
-		ret = socket_send_done(socket, ret, flags & BSD_MSG_NOSIGNAL, 0);
+		// XNU's error, and its SIGPIPE: Linux raised none (sostate.h, nosigpipe.h)
+		ret = socket_send_done(socket, socket_error_send(socket, ret), flags & BSD_MSG_NOSIGNAL, 0);
 	}
 
 	if (lchdr != NULL)

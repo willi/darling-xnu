@@ -4,6 +4,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/fcntl/fcntl.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 
 #include <darlingserver/rpc.h>
 
@@ -40,6 +41,10 @@ void _signal_knote_close_4libkqueue(int fd) {
 	signal_knote_close(fd);
 };
 
-int _socket_state_4libkqueue(int fd, unsigned int* state, int* error) {
-	return socket_state(fd, state, error);
+int _socket_state_4libkqueue(int fd, struct socket_state_4libkqueue* state) {
+	return socket_state(fd, state);
+};
+
+void _socket_watch_4libkqueue(int delta) {
+	socket_watch(delta);
 };

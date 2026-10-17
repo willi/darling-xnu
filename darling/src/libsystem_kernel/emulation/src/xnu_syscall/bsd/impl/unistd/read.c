@@ -35,8 +35,8 @@ long sys_read_nocancel(int fd, void* mem, int len)
 		ret = errno_linux_to_bsd(ret);
 	}
 
-	// on a socket with no data, XNU returns its pending error first (sostate.h)
-	if (ret <= 0 && SOCKET_ERRORS_HELD())
+	// on a socket, the error XNU's soreceive() would return (sostate.h)
+	if (ret <= 0 && SOCKET_READ_HOOKED(ret))
 		ret = socket_error_read(fd, ret, 0);
 
 	return ret;

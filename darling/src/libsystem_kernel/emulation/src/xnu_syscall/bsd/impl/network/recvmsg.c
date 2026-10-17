@@ -120,8 +120,8 @@ long sys_recvmsg_nocancel(int socket, struct bsd_msghdr* msg, int flags)
 	if (lchdr != NULL)
 		free(lchdr);
 
-	// with no data, XNU returns the socket's pending error first (sostate.h)
-	if (ret <= 0 && SOCKET_ERRORS_HELD())
+	// the error XNU's soreceive() would return (sostate.h)
+	if (ret <= 0 && SOCKET_READ_HOOKED(ret))
 		ret = socket_error_read(socket, ret, flags & BSD_MSG_PEEK);
 
 	// __simple_printf("Returning %d\n", ret);

@@ -44,8 +44,8 @@ long sys_recvfrom_nocancel(int fd, void* buf, unsigned long len,
 			ret = *socklen;
 	}
 
-	// with no data, XNU returns the socket's pending error first (sostate.h)
-	if (ret <= 0 && SOCKET_ERRORS_HELD())
+	// the error XNU's soreceive() would return (sostate.h)
+	if (ret <= 0 && SOCKET_READ_HOOKED(ret))
 		ret = socket_error_read(fd, ret, flags & BSD_MSG_PEEK);
 
 	return ret;

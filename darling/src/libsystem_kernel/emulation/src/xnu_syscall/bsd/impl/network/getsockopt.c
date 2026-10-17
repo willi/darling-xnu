@@ -97,8 +97,8 @@ long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 				int* err = (int*) optval;
 				if (err && *err)
 					*err = errno_linux_to_bsd(*err);
-				// an error EVFILT_SOCK took from Linux, held for this
-				if (err && SOCKET_ERRORS_HELD())
+				// an error EVFILT_SOCK took from Linux, held for this (sostate.h)
+				if (err && SOCKET_ERROR_OPT_HOOKED(*err))
 					*err = socket_error_take(fd, *err);
 			}
 			else if (optname == BSD_SO_RCVTIMEO)

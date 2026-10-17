@@ -20,8 +20,8 @@ long sys_readv_nocancel(int fd, struct iovec* iovp, unsigned int len)
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 
-	// on a socket with no data, XNU returns its pending error first (sostate.h)
-	if (ret <= 0 && SOCKET_ERRORS_HELD())
+	// on a socket, the error XNU's soreceive() would return (sostate.h)
+	if (ret <= 0 && SOCKET_READ_HOOKED(ret))
 		ret = socket_error_read(fd, ret, 0);
 
 	return ret;

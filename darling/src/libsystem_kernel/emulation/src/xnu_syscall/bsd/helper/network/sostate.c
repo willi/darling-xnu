@@ -6,47 +6,20 @@
 #include <libsimple/lock.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/sigsafe_lock.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
 
 #define LINUX_SOL_SOCKET 1
 #define LINUX_SO_ERROR 4
-#define LINUX_SO_COOKIE 57
-#define LINUX_SOL_TCP 6
-#define LINUX_TCP_INFO 11
 #define LINUX_SYS_GETPEERNAME 7
-#define LINUX_SYS_GETSOCKOPT 15
-#define LINUX_SIG_BLOCK 0
-#define LINUX_SIG_SETMASK 2
 
 #define LINUX_POLLIN 0x0001
 #define LINUX_POLLOUT 0x0004
 #define LINUX_POLLERR 0x0008
 #define LINUX_POLLHUP 0x0010
-#define LINUX_POLLNVAL 0x0020
 #define LINUX_POLLRDHUP 0x2000
-
-// Linux's TCP states (include/net/tcp_states.h)
-enum {
-	LINUX_TCP_ESTABLISHED = 1,
-	LINUX_TCP_SYN_SENT,
-	LINUX_TCP_SYN_RECV,
-	LINUX_TCP_FIN_WAIT1,
-	LINUX_TCP_FIN_WAIT2,
-	LINUX_TCP_TIME_WAIT,
-	LINUX_TCP_CLOSE,
-	LINUX_TCP_CLOSE_WAIT,
-	LINUX_TCP_LAST_ACK,
-	LINUX_TCP_LISTEN,
-	LINUX_TCP_CLOSING,
-};
-
-// the start of Linux's struct tcp_info, up to tcpi_segs_out (Linux 4.2)
-struct linux_tcp_info {
-	uint8_t state;
-	uint8_t other[135];
-	uint32_t segs_out;
-};
 
 struct linux_pollfd {
 	int fd;
@@ -59,15 +32,6 @@ struct linux_timespec {
 	long tv_nsec;
 };
 
-static long linux_getsockopt(int fd, int level, int name, void* value, unsigned int* len)
-{
-#ifdef __NR_socketcall
-	return LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_GETSOCKOPT, ((long[6]) { fd, level, name, value, len, 0 }));
-#else
-	return LINUX_SYSCALL(__NR_getsockopt, fd, level, name, value, len);
-#endif
-}
-
 static long linux_getpeername(int fd)
 {
 	char addr[128];
@@ -79,104 +43,141 @@ static long linux_getpeername(int fd)
 #endif
 }
 
-static long socket_cookie(int fd, unsigned long long* cookie)
-{
-	unsigned int len = sizeof(*cookie);
-	return linux_getsockopt(fd, LINUX_SOL_SOCKET, LINUX_SO_COOKIE, cookie, &len);
-}
-
-// The errors taken from Linux and not yet from here: a socket's newest, with the order they came in, so that a full
-// table drops the oldest. Every access takes the lock, which blocks signals while held (as ulock_wait.c's table
-// does), so a signal handler's read() can't deadlock on it.
-struct held_error {
+// The sockets remembered: the error each holds (taken from Linux, not yet by the program), and the errors each has had,
+// for EVFILT_SOCK's hints. Every access takes the lock, which blocks signals while held (sigsafe_lock.h).
+struct socket_entry {
 	unsigned long long cookie; // 0: free (Linux's socket cookies start at 1)
-	unsigned long long order;
-	int error;
+	unsigned long long order;  // when it was remembered: a full table forgets the oldest
+	int held;                  // the held error (a BSD errno), 0 if none
+	int last;                  // the newest error the socket has had
+	unsigned int errors;       // how many it has had
 };
 
-static struct held_error held_errors[SOCKET_ERRORS_MAX];
-static unsigned long long held_order;
-static libsimple_lock_t held_errors_lock = LIBSIMPLE_LOCK_INITIALIZER;
+static struct socket_entry entries[SOCKET_ENTRIES_MAX];
+static unsigned long long entries_order;
+static libsimple_lock_t entries_lock = LIBSIMPLE_LOCK_INITIALIZER;
 volatile int socket_errors_held;
+volatile int socket_errors_taking;
+volatile int socket_entries_used;
+volatile int socket_watchers;
 
-static unsigned long long held_lock(void)
+void socket_watch(int delta)
 {
-	unsigned long long all = ~0ull, old;
-
-	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_BLOCK, &all, &old, sizeof(all));
-	libsimple_lock_lock(&held_errors_lock);
-	return old;
-}
-
-static void held_unlock(unsigned long long old)
-{
-	libsimple_lock_unlock(&held_errors_lock);
-	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_SETMASK, &old, NULL, sizeof(old));
+	__atomic_add_fetch(&socket_watchers, delta, __ATOMIC_SEQ_CST);
 }
 
 void socket_errors_atfork_child(void)
 {
-	// the child has only the forking thread: nobody holds the lock. It keeps the errors: its sockets are the parent's.
-	libsimple_lock_init(&held_errors_lock);
+	// the child has only the forking thread: nobody holds the lock, or is taking an error. It keeps the errors:
+	// its sockets are the parent's.
+	libsimple_lock_init(&entries_lock);
+	socket_errors_taking = 0;
 }
 
-static struct held_error* held_find_locked(unsigned long long cookie)
+static struct socket_entry* find_locked(unsigned long long cookie)
 {
-	for (int i = 0; i < SOCKET_ERRORS_MAX; i++) {
-		if (held_errors[i].cookie == cookie)
-			return &held_errors[i];
+	for (int i = 0; i < SOCKET_ENTRIES_MAX; i++) {
+		if (entries[i].cookie == cookie)
+			return &entries[i];
 	}
 	return NULL;
 }
 
-static void held_drop_locked(struct held_error* h)
+static void unhold_locked(struct socket_entry* e)
 {
-	h->cookie = 0;
-	__atomic_sub_fetch(&socket_errors_held, 1, __ATOMIC_RELEASE);
+	if (e->held != 0) {
+		e->held = 0;
+		__atomic_sub_fetch(&socket_errors_held, 1, __ATOMIC_SEQ_CST);
+	}
 }
 
-static void held_put(unsigned long long cookie, int error)
+static void forget_locked(struct socket_entry* e)
 {
-	unsigned long long mask = held_lock();
-	struct held_error* h = held_find_locked(cookie);
+	unhold_locked(e);
+	e->cookie = 0;
+	__atomic_sub_fetch(&socket_entries_used, 1, __ATOMIC_SEQ_CST);
+}
 
-	if (h == NULL) {
-		h = held_find_locked(0);
-		if (h == NULL) {
-			h = &held_errors[0];
-			for (int i = 1; i < SOCKET_ERRORS_MAX; i++) {
-				if (held_errors[i].order < h->order)
-					h = &held_errors[i];
-			}
-		} else {
-			__atomic_add_fetch(&socket_errors_held, 1, __ATOMIC_RELEASE);
+// The socket's entry, made if it has none
+static struct socket_entry* entry_locked(unsigned long long cookie)
+{
+	struct socket_entry* e = find_locked(cookie);
+
+	if (e != NULL)
+		return e;
+	e = find_locked(0);
+	if (e == NULL) {
+		e = &entries[0];
+		for (int i = 1; i < SOCKET_ENTRIES_MAX; i++) {
+			if (entries[i].order < e->order)
+				e = &entries[i];
 		}
-		h->cookie = cookie;
-		h->order = ++held_order;
+		forget_locked(e);
 	}
-	h->error = error;
-	held_unlock(mask);
+	e->cookie = cookie;
+	e->order = ++entries_order;
+	e->held = 0;
+	e->last = 0;
+	e->errors = 0;
+	__atomic_add_fetch(&socket_entries_used, 1, __ATOMIC_SEQ_CST);
+	return e;
 }
 
-// the error held for the socket; cleared if take
-static int held_get(unsigned long long cookie, int take)
+static void hold_locked(struct socket_entry* e, int error)
 {
-	int error = 0;
-	unsigned long long mask = held_lock();
-	struct held_error* h = held_find_locked(cookie);
+	if (e->held == 0)
+		__atomic_add_fetch(&socket_errors_held, 1, __ATOMIC_SEQ_CST);
+	e->held = error;
+}
 
-	if (h != NULL) {
-		error = h->error;
-		if (take)
-			held_drop_locked(h);
+static void count_locked(struct socket_entry* e, int error)
+{
+	e->last = error;
+	e->errors++;
+}
+
+// An entry that no longer holds an error and whose errors nobody counts is forgotten
+static void tidy_locked(struct socket_entry* e)
+{
+	if (e->held == 0 && socket_watchers == 0)
+		forget_locked(e);
+}
+
+// The errors Linux sets on a socket (sk_err) for its peer or the network
+static int socket_error(int error)
+{
+	switch (error) {
+	case ECONNREFUSED:
+	case ECONNRESET:
+	case ECONNABORTED:
+	case EPIPE:
+	case ETIMEDOUT:
+	case EHOSTUNREACH:
+	case ENETUNREACH:
+	case EHOSTDOWN:
+	case ENETDOWN:
+		return 1;
+	default:
+		return 0;
 	}
-	held_unlock(mask);
-	return error;
+}
+
+// A TCP socket's error as XNU's TCP would have set it: Linux sets EPIPE for a reset in CLOSE_WAIT, where XNU's
+// tcp_input() sets ECONNRESET as in the other synchronized states
+static int tcp_error(int error)
+{
+	return error == EPIPE ? ECONNRESET : error;
+}
+
+static int is_tcp(int fd)
+{
+	struct linux_tcp_info info;
+	return linux_tcp_info(fd, &info) == 0;
 }
 
 // XNU's so_state for a TCP socket in Linux state info->state. A socket that is closed (or in TIME_WAIT, which Linux
-// reports as closed) after sending anything has been disconnected (XNU's tcp_close() calls soisdisconnected());
-// one that has sent nothing is new.
+// reports as closed) after any segment went either way has been disconnected (XNU's tcp_close() calls
+// soisdisconnected()); one that has seen none is new.
 static unsigned tcp_state(const struct linux_tcp_info* info)
 {
 	switch (info->state) {
@@ -192,22 +193,42 @@ static unsigned tcp_state(const struct linux_tcp_info* info)
 		return SOSTATE_ISCONNECTED | SOSTATE_CANTRCVMORE | SOSTATE_CANTSENDMORE;
 	case LINUX_TCP_TIME_WAIT:
 	case LINUX_TCP_CLOSE:
-		return info->segs_out ? SOSTATE_ISDISCONNECTED | SOSTATE_CANTRCVMORE | SOSTATE_CANTSENDMORE : 0;
+		return (info->segs_out || info->segs_in) ? SOSTATE_ISDISCONNECTED | SOSTATE_CANTRCVMORE | SOSTATE_CANTSENDMORE
+			: 0;
 	default: // SYN_SENT, SYN_RECV, LISTEN
 		return 0;
 	}
 }
 
-int socket_state(int fd, unsigned* state, int* error)
+// Takes a closed TCP socket's error from Linux and holds it. Readers that found nothing in Linux meanwhile see
+// socket_errors_taking, and wait for the lock to find it held.
+static void take_tcp_error(int fd, unsigned long long cookie)
+{
+	int linux_error = 0;
+	unsigned int len = sizeof(linux_error);
+	unsigned long long mask;
+
+	__atomic_add_fetch(&socket_errors_taking, 1, __ATOMIC_SEQ_CST);
+	mask = sigsafe_lock(&entries_lock);
+	if (linux_getsockopt(fd, LINUX_SOL_SOCKET, LINUX_SO_ERROR, &linux_error, &len) == 0 && linux_error != 0) {
+		int error = tcp_error(errno_linux_to_bsd(linux_error));
+		struct socket_entry* e = entry_locked(cookie);
+		hold_locked(e, error);
+		count_locked(e, error);
+	}
+	sigsafe_unlock(&entries_lock, mask);
+	__atomic_sub_fetch(&socket_errors_taking, 1, __ATOMIC_SEQ_CST);
+}
+
+int socket_state(int fd, struct socket_state_4libkqueue* st)
 {
 	unsigned long long cookie;
 	struct linux_pollfd pfd = { .fd = fd, .events = LINUX_POLLIN | LINUX_POLLOUT | LINUX_POLLRDHUP };
 	struct linux_timespec now = { 0, 0 };
 	struct linux_tcp_info info;
-	unsigned int len = sizeof(info);
 	long ret;
 
-	ret = socket_cookie(fd, &cookie);
+	ret = linux_socket_cookie(fd, &cookie);
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
 
@@ -215,56 +236,152 @@ int socket_state(int fd, unsigned* state, int* error)
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
 
-	// Linux reports a socket error (sk_err) as POLLERR; take it, and hold it until XNU's would be taken
-	if (pfd.revents & LINUX_POLLERR) {
-		int linux_error = 0;
-		unsigned int elen = sizeof(linux_error);
-		if (linux_getsockopt(fd, LINUX_SOL_SOCKET, LINUX_SO_ERROR, &linux_error, &elen) == 0 && linux_error != 0)
-			held_put(cookie, errno_linux_to_bsd(linux_error));
-	}
-	*error = SOCKET_ERRORS_HELD() ? held_get(cookie, 0) : 0;
+	st->error = 0;
+	st->errors = 0;
+	st->last_error = 0;
 
-	if (linux_getsockopt(fd, LINUX_SOL_TCP, LINUX_TCP_INFO, &info, &len) == 0 && len >= sizeof(info)) {
-		*state = tcp_state(&info) | SOSTATE_EVCONNINFO;
+	if (linux_tcp_info(fd, &info) == 0) {
+		st->state = tcp_state(&info) | SOSTATE_EVCONNINFO;
+		// Linux reports a socket error (sk_err) as POLLERR. A closed TCP socket's is why it closed.
+		if ((pfd.revents & LINUX_POLLERR) && info.state == LINUX_TCP_CLOSE)
+			take_tcp_error(fd, cookie);
 	} else {
 		// Other sockets: one with a peer is connected until it hangs up (Linux: both directions shut down), then
 		// disconnected. A new stream socket hangs up too, but has no peer. Linux doesn't report a shutdown of only
 		// the sending direction.
-		*state = 0;
+		st->state = 0;
 		if (linux_getpeername(fd) == 0) {
 			if (pfd.revents & LINUX_POLLHUP)
-				*state = SOSTATE_ISDISCONNECTED | SOSTATE_CANTRCVMORE | SOSTATE_CANTSENDMORE;
+				st->state = SOSTATE_ISDISCONNECTED | SOSTATE_CANTRCVMORE | SOSTATE_CANTSENDMORE;
 			else
-				*state = SOSTATE_ISCONNECTED;
+				st->state = SOSTATE_ISCONNECTED;
 		}
 	}
 
 	// the receiving direction shut down (the peer's FIN, or shutdown(SHUT_RD))
 	if (pfd.revents & LINUX_POLLRDHUP)
-		*state |= SOSTATE_CANTRCVMORE;
+		st->state |= SOSTATE_CANTRCVMORE;
+
+	if (SOCKET_ENTRIES_USED()) {
+		unsigned long long mask = sigsafe_lock(&entries_lock);
+		struct socket_entry* e = find_locked(cookie);
+		if (e != NULL) {
+			st->error = e->held;
+			st->errors = e->errors;
+			st->last_error = e->last;
+		}
+		sigsafe_unlock(&entries_lock, mask);
+	}
 
 	return 0;
+}
+
+// Linux returned error, its own, to the program: the socket's one error is now that, so the held one goes; counted
+// for EVFILT_SOCK
+static void linux_gave_error(unsigned long long cookie, int error)
+{
+	unsigned long long mask = sigsafe_lock(&entries_lock);
+	struct socket_entry* e = find_locked(cookie);
+
+	if (e == NULL && socket_watchers != 0)
+		e = entry_locked(cookie);
+	if (e != NULL) {
+		unhold_locked(e);
+		count_locked(e, error);
+		tidy_locked(e);
+	}
+	sigsafe_unlock(&entries_lock, mask);
+}
+
+// The held error, cleared unless peek; 0 if none
+static int held_error(unsigned long long cookie, int peek)
+{
+	int error = 0;
+	unsigned long long mask = sigsafe_lock(&entries_lock);
+	struct socket_entry* e = find_locked(cookie);
+
+	if (e != NULL && e->held != 0) {
+		error = e->held;
+		if (!peek) {
+			unhold_locked(e);
+			tidy_locked(e);
+		}
+	}
+	sigsafe_unlock(&entries_lock, mask);
+	return error;
 }
 
 int socket_error_take(int fd, int error)
 {
 	unsigned long long cookie;
 
-	if (socket_cookie(fd, &cookie) < 0)
+	if (linux_socket_cookie(fd, &cookie) < 0)
 		return error;
 
-	// one error per socket, as XNU has: Linux's, if it has a newer one
-	int held = held_get(cookie, 1);
-	return error != 0 ? error : held;
+	if (error != 0) {
+		if (error == EPIPE && is_tcp(fd))
+			error = tcp_error(error);
+		linux_gave_error(cookie, error);
+		return error;
+	}
+	return held_error(cookie, 0);
 }
 
 long socket_error_read(int fd, long ret, int peek)
 {
 	unsigned long long cookie;
 
-	if (ret > 0 || socket_cookie(fd, &cookie) < 0)
+	// no data: XNU's soreceive() returns the pending error before end of file or EWOULDBLOCK
+	if (ret == 0 || ret == -EAGAIN || ret == -ENOTCONN) {
+		if (!SOCKET_ERRORS_HELD() || linux_socket_cookie(fd, &cookie) < 0)
+			return ret;
+		int held = held_error(cookie, peek);
+		return held != 0 ? -held : ret;
+	}
+
+	if (!socket_error(-ret) || linux_socket_cookie(fd, &cookie) < 0)
+		return ret;
+	if (ret == -EPIPE) {
+		// reads fail with EPIPE only on a TCP socket reset in CLOSE_WAIT
+		if (!is_tcp(fd))
+			return ret;
+		ret = -tcp_error(EPIPE);
+	}
+	linux_gave_error(cookie, -ret);
+	return ret;
+}
+
+long socket_error_send(int fd, long ret)
+{
+	struct linux_tcp_info info;
+	unsigned long long cookie;
+	int error = -ret;
+
+	// XNU's sosendcheck() fails a send on a disconnected socket with EPIPE, before looking at so_error, which stays;
+	// Linux's TCP returns (and clears) the error that closed the socket
+	if (error == EPIPE || !socket_error(error))
+		return ret;
+	if (linux_tcp_info(fd, &info) < 0 || info.state != LINUX_TCP_CLOSE || linux_socket_cookie(fd, &cookie) < 0)
 		return ret;
 
-	int held = held_get(cookie, !peek);
-	return held != 0 ? -held : ret;
+	unsigned long long mask = sigsafe_lock(&entries_lock);
+	struct socket_entry* e = entry_locked(cookie);
+	hold_locked(e, tcp_error(error));
+	count_locked(e, e->held);
+	sigsafe_unlock(&entries_lock, mask);
+	return -EPIPE;
+}
+
+void socket_errors_close(int fd)
+{
+	unsigned long long cookie;
+
+	if (linux_socket_cookie(fd, &cookie) < 0)
+		return;
+
+	unsigned long long mask = sigsafe_lock(&entries_lock);
+	struct socket_entry* e = find_locked(cookie);
+	if (e != NULL)
+		forget_locked(e);
+	sigsafe_unlock(&entries_lock, mask);
 }
