@@ -13,6 +13,7 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/common/sigsafe_lock.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/common/guarded/table.h>
@@ -20,6 +21,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/ifinfo.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/rtnetlink.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
 
 extern void* memset(void* destination, int value, __SIZE_TYPE__ length);
@@ -27,12 +29,8 @@ extern void* memcpy(void* destination, const void* source, __SIZE_TYPE__ n);
 
 #define LINUX_AF_UNIX 1
 #define LINUX_SOCK_CLOEXEC 02000000
-#define LINUX_SOL_SOCKET 1
-#define LINUX_SO_COOKIE 57
 #define LINUX_F_SETFD 2
 #define LINUX_SYS_SOCKETPAIR 8
-#define LINUX_SIG_BLOCK 0
-#define LINUX_SIG_SETMASK 2
 
 // XNU's private RTM_GET that only the sender sees (net/route.h, PRIVATE)
 #ifndef RTM_GET_SILENT
@@ -49,17 +47,6 @@ static long linux_sendto(int fd, const void* buf, unsigned long len, int flags)
 	return LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDTO, ((long[6]) { fd, buf, len, flags, 0, 0 }));
 #else
 	return LINUX_SYSCALL(__NR_sendto, fd, buf, len, flags, 0, 0);
-#endif
-}
-
-static long linux_socket_cookie(int fd, unsigned long long* cookie)
-{
-	unsigned int len = sizeof(*cookie);
-#ifdef __NR_socketcall
-	return LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_GETSOCKOPT,
-			((long[6]) { fd, LINUX_SOL_SOCKET, LINUX_SO_COOKIE, cookie, &len, 0 }));
-#else
-	return LINUX_SYSCALL(__NR_getsockopt, fd, LINUX_SOL_SOCKET, LINUX_SO_COOKIE, cookie, &len);
 #endif
 }
 
@@ -102,17 +89,12 @@ volatile int route_socket_count;
 
 static unsigned long long route_lock(void)
 {
-	unsigned long long all = ~0ull, old;
-
-	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_BLOCK, &all, &old, sizeof(all));
-	libsimple_lock_lock(&route_sockets_lock);
-	return old;
+	return sigsafe_lock(&route_sockets_lock);
 }
 
 static void route_unlock(unsigned long long old)
 {
-	libsimple_lock_unlock(&route_sockets_lock);
-	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_SETMASK, &old, NULL, sizeof(old));
+	sigsafe_unlock(&route_sockets_lock, old);
 }
 
 void route_atfork_child(void)
