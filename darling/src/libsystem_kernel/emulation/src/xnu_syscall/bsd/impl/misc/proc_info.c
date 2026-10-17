@@ -128,10 +128,10 @@ static bool parse_smaps_firstline(
 	char* vip_path
 );
 static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
-static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
-static void pidinfo_names(int32_t pid, const char* linux_comm, struct executable_names* names);
+static long _proc_pidinfo_shortbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
+static long fill_shortbsdinfo(int32_t pid, uint64_t arg, struct proc_bsdshortinfo* info, struct proc_names* names);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
-static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_tbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
@@ -154,7 +154,7 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		}
 		case PROC_PIDT_SHORTBSDINFO:
 		{
-			return _proc_pidinfo_shortbsdinfo(pid, buffer, bufsize);
+			return _proc_pidinfo_shortbsdinfo(pid, arg, buffer, bufsize);
 		}
 		case PROC_PIDUNIQIDENTIFIERINFO:
 		{
@@ -162,7 +162,7 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		}
 		case PROC_PIDTBSDINFO:
 		{
-			return _proc_pidinfo_tbsdinfo(pid, buffer, bufsize);
+			return _proc_pidinfo_tbsdinfo(pid, arg, buffer, bufsize);
 		}
 		case PROC_PIDTHREADINFO:
 		{
@@ -232,7 +232,8 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 // glibc bits/confname.h
 #define _SC_CLK_TCK 2
 
-static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+// arg: as in XNU's proc_pidinfo(), nonzero finds a zombie too
+static long _proc_pidinfo_tbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
 {
 	struct proc_bsdinfo* info = (struct proc_bsdinfo*) buffer;
 
@@ -240,7 +241,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
 		return -ENOSPC;
 
 	struct proc_bsdshortinfo shortinfo;
-	int err = _proc_pidinfo_shortbsdinfo(pid, &shortinfo, sizeof(shortinfo));
+	struct proc_names names;
+	long err = fill_shortbsdinfo(pid, arg, &shortinfo, &names);
 
 	if (err < 0)
 		return err;
@@ -293,8 +295,6 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
 	info->pbi_start_tvusec = starttime_usecs;
 
 	// proc_pidbsdinfo(): MAXCOMLEN bytes of p_comm and 2 * MAXCOMLEN of p_name, each with its last byte a NUL
-	struct executable_names names = { 0 };
-	pidinfo_names(pid, shortinfo.pbsi_comm, &names);
 	memcpy(info->pbi_comm, names.p_comm, MAXCOMLEN);
 	info->pbi_comm[MAXCOMLEN - 1] = '\0';
 	memcpy(info->pbi_name, names.p_name, 2 * MAXCOMLEN);
@@ -334,30 +334,32 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
 	return sizeof(struct proc_threadinfo);
 }
 
-// A process's p_name and p_comm (executable_names()); Linux's comm stands in for a process that isn't Darling's
-static void pidinfo_names(int32_t pid, const char* linux_comm, struct executable_names* names)
+static long _proc_pidinfo_shortbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
 {
-	if (executable_names(pid, names) == 0)
-		return;
-	strncpy(names->p_name, linux_comm, sizeof(names->p_name) - 1);
-	names->p_name[sizeof(names->p_name) - 1] = '\0';
-	strncpy(names->p_comm, linux_comm, sizeof(names->p_comm) - 1);
-	names->p_comm[sizeof(names->p_comm) - 1] = '\0';
+	struct proc_names names;
+	long err;
+
+	if (bufsize < sizeof(struct proc_bsdshortinfo))
+		return -ENOSPC;
+	memset(buffer, 0, bufsize);
+	if ((err = fill_shortbsdinfo(pid, arg, (struct proc_bsdshortinfo*) buffer, &names)) < 0)
+		return err;
+	return sizeof(struct proc_bsdshortinfo);
 }
 
-static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+// PROC_PIDT_SHORTBSDINFO's fields into info, and the names it took pbsi_comm from into names (PROC_PIDTBSDINFO's other
+// two): 0, or a negative errno. arg: nonzero finds a zombie too.
+static long fill_shortbsdinfo(int32_t pid, uint64_t arg, struct proc_bsdshortinfo* info, struct proc_names* names)
 {
 	char path[64], stat[1024];
 	char *statptr;
 	const char* elem;
+	const char* linux_comm;
+	long err;
 	static int uid = -1;
 	static int gid = -1;
 
-	struct proc_bsdshortinfo* info = (struct proc_bsdshortinfo*) buffer;
-	if (bufsize < sizeof(*info))
-		return -ENOSPC;
-
-	memset(buffer, 0, bufsize);
+	memset(info, 0, sizeof(*info));
 
 	__simple_sprintf(path, "/proc/%d/stat", pid);
 	if (!read_string(path, stat, sizeof(stat)))
@@ -370,15 +372,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
 
 #define READELEM() elem = next_stat_elem(&statptr); if (!elem) goto reterr
 
-	// comm: Linux's is mldr's, or the main thread's name. XNU's proc_pidbsdshortinfo() copies MAXCOMLEN bytes of p_comm
-	// and makes the last a NUL.
+	// comm: Linux's is mldr's, or the main thread's name; the executable's names are XNU's (below)
 	READELEM();
-	{
-		struct executable_names names = { 0 };
-		pidinfo_names(pid, elem, &names);
-		memcpy(info->pbsi_comm, names.p_comm, MAXCOMLEN);
-		info->pbsi_comm[MAXCOMLEN - 1] = '\0';
-	}
+	linux_comm = elem;
 
 	// process state
 	READELEM();
@@ -395,11 +391,21 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
 			info->pbsi_status = SSTOP;
 			break;
 		case 'Z':
+			// proc_find() doesn't find a zombie (xnu-12377.121.6 bsd/kern/kern_proc.c), and proc_pidinfo() looks for one
+			// only when asked to (bsd/kern/proc_info.c)
+			if (!arg)
+				return -ESRCH;
 			info->pbsi_status = SZOMB;
 			break;
 		default:
 			info->pbsi_status = SSLEEP;
 	}
+
+	// XNU's proc_pidshortbsdinfo() copies MAXCOMLEN bytes of p_comm and makes the last a NUL
+	if ((err = executable_proc_names(pid, linux_comm, names)) < 0)
+		return errno_linux_to_bsd(err);
+	memcpy(info->pbsi_comm, names->p_comm, MAXCOMLEN);
+	info->pbsi_comm[MAXCOMLEN - 1] = '\0';
 
 	// ppid
 	READELEM();
@@ -425,7 +431,7 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
 	if (is_64_bit)
 		info->pbsi_flags |= P_LP64;
 
-	return sizeof(struct proc_bsdshortinfo);
+	return 0;
 reterr:
 	return -EINVAL;
 }
@@ -745,7 +751,8 @@ static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize
 	if (bufsize < sizeof(struct proc_taskallinfo))
 		return -ENOSPC;
 	
-	long err = _proc_pidinfo_tbsdinfo(pid, buffer + offsetof(struct proc_taskallinfo, pbsd), sizeof(struct proc_bsdinfo));
+	// PROC_PIDTASKALLINFO finds no zombie
+	long err = _proc_pidinfo_tbsdinfo(pid, 0, buffer + offsetof(struct proc_taskallinfo, pbsd), sizeof(struct proc_bsdinfo));
 	
 	if (err < 0)
 		return err;

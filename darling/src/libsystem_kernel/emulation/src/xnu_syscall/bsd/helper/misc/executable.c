@@ -5,6 +5,7 @@
 #include <mach-o/loader.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
@@ -12,54 +13,97 @@
 
 extern void* memcpy(void* dst, const void* src, size_t n);
 
-long executable_names(int pid, struct executable_names* names)
+// The path darlingserver recorded at pid's exec, into path (size bytes): 0, or a negative Linux errno (ESRCH: no such
+// process, or none it knows).
+static long executable_path(int pid, char* path, size_t size)
 {
-	char path[4096];
 	uint64_t full_length;
-	size_t len, start, n;
 	int ret;
 
-	ret = dserver_rpc_get_executable_path(pid, path, sizeof(path), &full_length);
+	ret = dserver_rpc_get_executable_path(pid, path, size, &full_length);
 	if (ret < 0)
 		return -LINUX_EIO;
 	if (ret > 0)
 		return -ret;
-	if (full_length >= sizeof(path))
+	if (full_length >= size)
 		return -LINUX_ENAMETOOLONG;
+	return 0;
+}
 
-	len = full_length;
-	while (len > 1 && path[len - 1] == '/')
-		len--;
+// set_proc_name(): the last component, truncated to each field, which ends with a NUL
+static void set_names(struct proc_names* names, const char* name, size_t len)
+{
+	size_t n;
+
+	n = len < sizeof(names->p_name) - 1 ? len : sizeof(names->p_name) - 1;
+	memcpy(names->p_name, name, n);
+	names->p_name[n] = '\0';
+	n = len < sizeof(names->p_comm) - 1 ? len : sizeof(names->p_comm) - 1;
+	memcpy(names->p_comm, name, n);
+	names->p_comm[n] = '\0';
+}
+
+// The calling process's own names, which change only at exec, and an exec starts a fresh copy of this library. The
+// pid they're for is checked against the caller's: a fork's child has another. self_state: 0 empty, 1 being filled
+// (by the one thread that claimed it), 2 filled.
+static struct proc_names self_names;
+static int self_pid;
+static int self_state;
+
+long executable_proc_names(int pid, const char* linux_comm, struct proc_names* names)
+{
+	char path[4096];
+	size_t len, start;
+	long ret;
+	int is_self = pid == LINUX_SYSCALL0(__NR_getpid);
+
+	if (is_self && __atomic_load_n(&self_state, __ATOMIC_ACQUIRE) == 2 && self_pid == pid)
+	{
+		*names = self_names;
+		return 0;
+	}
+
+	ret = executable_path(pid, path, sizeof(path));
+	len = 0;
+	if (ret == 0)
+	{
+		len = __simple_strlen(path);
+		while (len > 1 && path[len - 1] == '/')
+			len--;
+	}
 	start = len;
 	while (start > 0 && path[start - 1] != '/')
 		start--;
-	len -= start;
-	if (len == 0)
-		return -LINUX_ESRCH; // nothing recorded
 
-	n = len < sizeof(names->p_name) - 1 ? len : sizeof(names->p_name) - 1;
-	memcpy(names->p_name, path + start, n);
-	names->p_name[n] = '\0';
-	n = len < sizeof(names->p_comm) - 1 ? len : sizeof(names->p_comm) - 1;
-	memcpy(names->p_comm, path + start, n);
-	names->p_comm[n] = '\0';
-	return 0;
+	if (ret == 0 && len > start)
+	{
+		set_names(names, path + start, len - start);
+		int empty = 0;
+		if (is_self && __atomic_compare_exchange_n(&self_state, &empty, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+		{
+			self_names = *names;
+			self_pid = pid;
+			__atomic_store_n(&self_state, 2, __ATOMIC_RELEASE);
+		}
+		return 0;
+	}
+
+	// nothing recorded (ESRCH, or an empty path: a process that hasn't told darlingserver yet)
+	if (ret == 0 || ret == -LINUX_ESRCH)
+	{
+		set_names(names, linux_comm, __simple_strlen(linux_comm));
+		return 0;
+	}
+	return ret;
 }
 
 int executable_open(int pid)
 {
 	char path[4096];
-	uint64_t full_length;
-	int ret;
+	long ret;
 
-	ret = dserver_rpc_get_executable_path(pid, path, sizeof(path), &full_length);
-	if (ret < 0)
-		return -LINUX_EIO;
-	if (ret > 0)
-		return -ret;
-	if (full_length >= sizeof(path))
-		return -LINUX_ENAMETOOLONG;
-
+	if ((ret = executable_path(pid, path, sizeof(path))) < 0)
+		return ret;
 	return LINUX_SYSCALL(__NR_open, path, LINUX_O_RDONLY | LINUX_O_CLOEXEC, 0);
 }
 
