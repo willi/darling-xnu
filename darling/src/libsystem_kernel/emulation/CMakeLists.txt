@@ -110,6 +110,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/misc/sha256.c
 	src/xnu_syscall/bsd/helper/misc/fdpath.c
 	src/xnu_syscall/bsd/helper/misc/mounts.c
+	src/xnu_syscall/bsd/helper/misc/path_access.c
 	src/xnu_syscall/bsd/helper/xattr/attrlist_pack.c
 	src/xnu_syscall/bsd/helper/xattr/xattr_names.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
@@ -259,6 +260,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/impl/time/setitimer.c
 	src/xnu_syscall/bsd/impl/time/utimes.c
 	src/xnu_syscall/bsd/impl/unistd/access.c
+	src/xnu_syscall/bsd/impl/unistd/access_extended.c
 	src/xnu_syscall/bsd/impl/unistd/chdir.c
 	src/xnu_syscall/bsd/impl/unistd/chflags.c
 	src/xnu_syscall/bsd/impl/unistd/chmod.c
