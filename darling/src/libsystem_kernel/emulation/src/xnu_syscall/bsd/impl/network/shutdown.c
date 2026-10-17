@@ -5,6 +5,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/network/socket.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 
 long sys_shutdown(int fd, int how)
 {
@@ -19,6 +20,8 @@ long sys_shutdown(int fd, int how)
 
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
+	else
+		kqueue_socket_changed(fd);
 
 	return ret;
 }

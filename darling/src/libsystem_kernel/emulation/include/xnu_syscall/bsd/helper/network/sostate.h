@@ -72,6 +72,11 @@ long socket_error_send(int fd, long ret);
 #define SOCKET_ENTRIES_USED() (socket_entries_used != 0)
 void socket_errors_close(int fd);
 
+// libkqueue's (a weak no-op without it): socket fd's state may have changed in a way Linux wakes no one for (a
+// datagram socket connected or disconnected, a shutdown): its EVFILT_SOCK knotes look again, as XNU's soevent()
+// would have them do.
+void kqueue_socket_changed(int fd);
+
 // In the child of a fork, before it runs anything else.
 void socket_errors_atfork_child(void);
 
