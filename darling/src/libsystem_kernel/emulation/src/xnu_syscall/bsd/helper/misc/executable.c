@@ -5,25 +5,78 @@
 #include <mach-o/loader.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darlingserver/rpc.h>
 
-int executable_open(int pid)
+extern void* memcpy(void* dst, const void* src, size_t n);
+
+// The path darlingserver recorded at pid's exec, into path (size bytes): 0, or a negative Linux errno (ESRCH: no such
+// process, or none it knows).
+static long executable_path(int pid, char* path, size_t size)
 {
-	char path[4096];
 	uint64_t full_length;
 	int ret;
 
-	ret = dserver_rpc_get_executable_path(pid, path, sizeof(path), &full_length);
+	ret = dserver_rpc_get_executable_path(pid, path, size, &full_length);
 	if (ret < 0)
 		return -LINUX_EIO;
 	if (ret > 0)
 		return -ret;
-	if (full_length >= sizeof(path))
+	if (full_length >= size)
 		return -LINUX_ENAMETOOLONG;
+	return 0;
+}
 
+// set_proc_name(): the last component, truncated to each field, which ends with a NUL
+static void set_names(struct proc_names* names, const char* name, size_t len)
+{
+	size_t n;
+
+	n = len < sizeof(names->p_name) - 1 ? len : sizeof(names->p_name) - 1;
+	memcpy(names->p_name, name, n);
+	names->p_name[n] = '\0';
+	n = len < sizeof(names->p_comm) - 1 ? len : sizeof(names->p_comm) - 1;
+	memcpy(names->p_comm, name, n);
+	names->p_comm[n] = '\0';
+}
+
+long executable_proc_names(int pid, const char* linux_comm, struct proc_names* names)
+{
+	char path[4096];
+	size_t len = 0, start;
+	long ret = executable_path(pid, path, sizeof(path));
+
+	if (ret == 0)
+	{
+		len = __simple_strlen(path);
+		while (len > 1 && path[len - 1] == '/')
+			len--;
+	}
+	start = len;
+	while (start > 0 && path[start - 1] != '/')
+		start--;
+	if (ret == 0 && len > start)
+	{
+		set_names(names, path + start, len - start);
+		return 0;
+	}
+
+	// Linux's comm: for a process darlingserver knows no executable for (ESRCH, or an empty path: one that hasn't told
+	// it yet), and in names on an error too
+	set_names(names, linux_comm, __simple_strlen(linux_comm));
+	return (ret == 0 || ret == -LINUX_ESRCH) ? 0 : ret;
+}
+
+int executable_open(int pid)
+{
+	char path[4096];
+	long ret;
+
+	if ((ret = executable_path(pid, path, sizeof(path))) < 0)
+		return ret;
 	return LINUX_SYSCALL(__NR_open, path, LINUX_O_RDONLY | LINUX_O_CLOEXEC, 0);
 }
 

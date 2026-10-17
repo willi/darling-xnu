@@ -13,6 +13,7 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/dirent/getdirentries.h>
 #include <darling/emulation/conversion/fcntl/open.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
 
 #include <darlingserver/rpc.h>
 
@@ -150,15 +151,21 @@ const char* next_stat_elem(char** buf)
 		return NULL;
 	else if (*start == '(')
 	{
-		char* end;
+		// comm, which may hold spaces and parentheses itself (a thread's name is any 15 bytes): it ends at the line's
+		// last ')'
+		char* end = NULL;
+		char* p;
 
 		start++;
-		end = start;
-
-		while (*end != ')' && *end)
-			end++;
+		for (p = start; *p; p++)
+		{
+			if (*p == ')')
+				end = p;
+		}
+		if (!end)
+			return NULL;
 		*end = '\0';
-		*buf = end+2;
+		*buf = end[1] ? end + 2 : end + 1;
 	}
 	else
 	{
@@ -188,8 +195,10 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 	char stat[1024];
 	char *statptr;
 	const char* elem;
+	const char* linux_comm;
 	struct kinfo_proc_chain* kinfo;
 	static int uid = -1, gid = -1;
+	static int names_failed;
 
 	__simple_sprintf(path, "/proc/%s/stat", name);
 
@@ -197,13 +206,6 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 	memset(kinfo, 0, sizeof(*kinfo));
 
 	kinfo->kinfo.kp_proc.p_pid = __simple_atoi(name, NULL);
-
-	bool is_64_bit;
-	if (dserver_rpc_task_is_64_bit(kinfo->kinfo.kp_proc.p_pid, &is_64_bit) < 0) {
-		is_64_bit = false;
-	}
-	if (is_64_bit)
-		kinfo->kinfo.kp_proc.p_flag |= P_LP64;
 
 	if (!read_string(path, stat, sizeof(stat)))
 		goto retnull;
@@ -213,9 +215,9 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 
 #define READELEM() elem = next_stat_elem(&statptr); if (!elem) goto retnull
 
-	// comm
+	// comm: Linux's is mldr's, or the main thread's name; the executable's names are XNU's (after the filters below)
 	READELEM();
-	strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
+	linux_comm = elem;
 
 	// process state
 	READELEM();
@@ -261,13 +263,11 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 	if (kinfo->kinfo.kp_eproc.e_tdev != 0)
 		kinfo->kinfo.kp_proc.p_flag |= P_CONTROLT;
 
-	skip_stat_elems(&statptr, NULL);
+	// tpgid to priority: XNU's p_priority stays 0, as nothing sets the proc's (fill_user64_externproc(), kern_sysctl.c)
+	skip_stat_elems(&statptr, 11);
 
 	READELEM();
-	kinfo->kinfo.kp_proc.p_priority = __simple_atoi(elem, NULL);
-
-	READELEM();
-	kinfo->kinfo.kp_proc.p_nice = __simple_atoi(elem, NULL);
+	kinfo->kinfo.kp_proc.p_nice = elem[0] == '-' ? -__simple_atoi(elem + 1, NULL) : __simple_atoi(elem, NULL);
 
 	// In the container, everything is owned by us
 	if (uid == -1 || gid == -1)
@@ -315,6 +315,27 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 			break;
 		default:
 			goto retnull;
+	}
+
+	// what the filters let through: these ask darlingserver
+	bool is_64_bit;
+	if (dserver_rpc_task_is_64_bit(kinfo->kinfo.kp_proc.p_pid, &is_64_bit) < 0) {
+		is_64_bit = false;
+	}
+	if (is_64_bit)
+		kinfo->kinfo.kp_proc.p_flag |= P_LP64;
+
+	// XNU's fill_user64_externproc() copies MAXCOMLEN bytes of p_comm. A list has no error for one process: one
+	// darlingserver can't name (not ESRCH, which executable_proc_names() answers itself) keeps Linux's comm.
+	{
+		struct proc_names names;
+		long err = executable_proc_names(kinfo->kinfo.kp_proc.p_pid, linux_comm, &names);
+		if (err < 0 && !names_failed)
+		{
+			__simple_kprintf("sysctl KERN_PROC: no name for pid %d from darlingserver: %ld", kinfo->kinfo.kp_proc.p_pid, err);
+			names_failed = 1;
+		}
+		memcpy(kinfo->kinfo.kp_proc.p_comm, names.p_comm, MAXCOMLEN);
 	}
 
 	return kinfo;

@@ -14,6 +14,7 @@
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/dirent/getdirentries.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
@@ -252,6 +253,20 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 	if (ret < 0)
 		goto out;
 
+	// mldr gets the write end: keep it above stdin, stdout and stderr, so nothing it prints lands in the pipe
+	if (pipe[1] < 3)
+	{
+		ret = sys_fcntl(pipe[1], F_DUPFD_CLOEXEC, 3);
+		if (ret < 0)
+		{
+			close_internal(pipe[0]);
+			close_internal(pipe[1]);
+			goto out;
+		}
+		close_internal(pipe[1]);
+		pipe[1] = ret;
+	}
+
 	// we don't want to call user atfork callbacks, but we *do* want to call most
 	// libsystem atfork callbacks to set up the environment for some of the calls we need
 	// to make for the setup
@@ -437,7 +452,7 @@ no_fork:
 
 				if (act->psfaa_filedes == pipe[1] || spawn_action_target_fd(act) == pipe[1])
 				{
-					ret = sys_fcntl(pipe[1], F_DUPFD_CLOEXEC, 0);
+					ret = sys_fcntl(pipe[1], F_DUPFD_CLOEXEC, 3);
 					if (ret < 0)
 						goto fail;
 
@@ -566,7 +581,8 @@ no_fork:
 			envp = new_envp;
 		}
 
-		ret = sys_execve((char*) path, argvp, envp);
+		// the no-fork case has no pipe (-1): its caller is the process that execs
+		ret = sys_execve_spawn((char*) path, (const char**) argvp, (const char**) envp, pipe[1]);
 fail:
 		//__simple_kprintf("posix_spawn is failing with %d\n", ret);
 		if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
@@ -612,12 +628,24 @@ fail:
 			goto out;
 		}
 
-		if (pid != NULL)
-			*pid = my_pid;
-
-		if (sys_read(pipe[0], &ret, sizeof(ret)) != sizeof(ret))
+		// XNU's posix_spawn() returns once the new image is activated, or with the error that failed it
+		// (sys_execve_spawn(), execve.h)
+		long got;
+		while ((got = sys_read_nocancel(pipe[0], &ret, sizeof(ret))) == -EINTR)
+			;
+		// only a negative errno is an error; EOF is success
+		if (got != sizeof(ret) || ret >= 0 || ret < -ELAST)
 			ret = 0;
 		close_internal(pipe[0]);
+
+		// a failed spawn leaves no process on XNU, and gives no pid: reap the child that reported it
+		if (ret < 0)
+		{
+			while (LINUX_SYSCALL(__NR_wait4, my_pid, NULL, 0, NULL) == -LINUX_EINTR)
+				;
+		}
+		else if (pid != NULL)
+			*pid = my_pid;
 	}
 
 out:
