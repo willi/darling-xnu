@@ -5,6 +5,7 @@
 #include <libsimple/lock.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/sigsafe_lock.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/fcntl/open.h>
@@ -29,8 +30,8 @@ static inline uint64_t slot_make(int signum, int fd)
 	return ((uint64_t) signum << 32) | (uint32_t) fd;
 }
 
-// With every signal blocked, a signal handler on this thread can't run while it holds the lock or is posting (and
-// wait on itself in signal_knote_close()).
+// With every signal blocked, a signal handler on this thread can't run while it is posting (and wait on itself in
+// signal_knote_close()); the lock is a sigsafe_lock.h one for the same reason.
 static void block_signals(linux_sigset_t* old)
 {
 	linux_sigset_t all = ~0ULL;
@@ -44,7 +45,7 @@ static void restore_signals(const linux_sigset_t* old)
 
 int signal_knote_open(int signum)
 {
-	linux_sigset_t old;
+	unsigned long long old;
 	int fd, i, ret;
 
 	if (signum <= 0 || signum >= 32)
@@ -61,8 +62,7 @@ int signal_knote_open(int signum)
 		return -LINUX_ENOMEM;
 	}
 
-	block_signals(&old);
-	libsimple_lock_lock(&signal_knotes_lock);
+	old = sigsafe_lock(&signal_knotes_lock);
 	for (i = 0; i < SIGNAL_KNOTES_MAX; i++)
 	{
 		if (signal_knotes[i] == 0)
@@ -71,8 +71,7 @@ int signal_knote_open(int signum)
 			break;
 		}
 	}
-	libsimple_lock_unlock(&signal_knotes_lock);
-	restore_signals(&old);
+	sigsafe_unlock(&signal_knotes_lock, old);
 
 	if (i == SIGNAL_KNOTES_MAX)
 	{
@@ -85,11 +84,10 @@ int signal_knote_open(int signum)
 
 void signal_knote_close(int fd)
 {
-	linux_sigset_t old;
+	unsigned long long old;
 	int i;
 
-	block_signals(&old);
-	libsimple_lock_lock(&signal_knotes_lock);
+	old = sigsafe_lock(&signal_knotes_lock);
 	for (i = 0; i < SIGNAL_KNOTES_MAX; i++)
 	{
 		uint64_t slot = signal_knotes[i];
@@ -99,8 +97,7 @@ void signal_knote_close(int fd)
 			break;
 		}
 	}
-	libsimple_lock_unlock(&signal_knotes_lock);
-	restore_signals(&old);
+	sigsafe_unlock(&signal_knotes_lock, old);
 
 	// A handler that read the slot before it was freed may still write to the descriptor. Sequentially consistent with
 	// the handler's increment and load: either it sees the slot freed, or this sees it posting.
