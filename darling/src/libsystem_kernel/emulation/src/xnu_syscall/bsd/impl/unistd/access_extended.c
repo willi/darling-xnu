@@ -213,10 +213,16 @@ static int accessx_check(const struct accessx_node* node, int uflags)
 	if (uid == 0)
 	{
 		// the superuser: anything but executing a regular file that no one may execute. Linux is still asked about
-		// reading and writing, which XNU's superuser always may: Linux's own root may not, in a user namespace, for
-		// a file whose owner isn't mapped into it.
+		// reading, writing and deleting (writing the parent), which XNU's superuser always may: Linux's own root may
+		// not, in a user namespace, for a file or directory whose owner isn't mapped into it.
 		if ((rights & KAUTH_VNODE_EXECUTE) && isreg && !(node->st.st_mode & 0111))
 			return EPERM;
+		if (rights & KAUTH_VNODE_DELETE)
+		{
+			ret = -linux_path_access(LINUX_AT_FDCWD, node->parent, XNU_W_OK, 0);
+			if (ret)
+				return ret;
+		}
 		mode = accessx_posix_mode(rights) & (XNU_R_OK | XNU_W_OK);
 		return mode ? -linux_path_access(LINUX_AT_FDCWD, node->vc.path, mode, 0) : 0;
 	}
