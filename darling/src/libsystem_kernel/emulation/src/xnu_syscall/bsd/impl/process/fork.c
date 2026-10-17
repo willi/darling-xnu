@@ -38,21 +38,20 @@ libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
 VISIBLE int __darling_fork_stop_child;
 #endif
 
+// clone() also returns a pidfd for the child (Linux 5.2)
+#define LINUX_CLONE_PIDFD 0x00001000
+
 // In the parent: returns once darlingserver has registered the child, whose task then has the special ports
 // this process had when it forked; the caller may change them as soon as fork() returns (launchd resets its
-// bootstrap port). The wait is for this child: a pidfd tells it from an earlier process with its PID, and
-// shows it dying before it checks in. Kernels without pidfd_open get by on the PID.
-static void wait_for_child_checkin(int child)
+// bootstrap port). The wait is for this child: `pidfd` (or -1) tells it from an earlier process with its PID,
+// and shows it dying before it checks in. The caller closes it.
+static void wait_for_child_checkin(int child, int pidfd)
 {
-	int pidfd = LINUX_SYSCALL(__NR_pidfd_open, child, 0);
 	int result;
 
 	do
-		result = dserver_rpc_fork_wait_for_child(child, pidfd < 0 ? -1 : pidfd);
+		result = dserver_rpc_fork_wait_for_child(child, pidfd);
 	while (result == -LINUX_EINTR);
-
-	if (pidfd >= 0)
-		LINUX_SYSCALL(__NR_close, pidfd);
 
 	// -ESRCH: the child died before it checked in
 	if (result < 0 && result != -LINUX_ESRCH)
@@ -76,6 +75,7 @@ long sys_fork(void)
 long sys_fork_special_ports_locked(void)
 {
 	int ret;
+	int pidfd = -1;
 	int wdfd = get_perthread_wd();
 	unsigned long long signal_mask;
 
@@ -87,11 +87,23 @@ long sys_fork_special_ports_locked(void)
 	// mldr's fork handlers (which hold its socket table's lock) until after them.
 	signal_mask = signals_block_all();
 	__darling_fork_prepare();
+
+	// The pidfd comes from clone() itself: opened once it returns, it could miss a child that was already reaped,
+	// or refer to another process that got its PID. Without pidfds (Linux before 5.3, where mldr gives each
+	// process a lifetime pipe instead), darlingserver goes by the PID.
+	ret = -LINUX_ENOSYS;
+	if (__dserver_get_process_lifetime_pipe() == -1)
+		ret = LINUX_SYSCALL(__NR_clone, LINUX_CLONE_PIDFD | LINUX_SIGCHLD, 0, &pidfd, 0, 0);
+	// no descriptor for the pidfd: fork without one
+	if (ret == -LINUX_ENOSYS || ret == -LINUX_EMFILE || ret == -LINUX_ENFILE)
+	{
+		pidfd = -1;
 #ifdef SYS_fork
-	ret = LINUX_SYSCALL(__NR_fork);
+		ret = LINUX_SYSCALL(__NR_fork);
 #else
-	ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
+		ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
 #endif
+	}
 	if (ret != 0)
 	{
 		__darling_fork_parent();
@@ -168,7 +180,11 @@ long sys_fork_special_ports_locked(void)
 		signals_restore(signal_mask);
 	}
 	else if (ret > 0)
-		wait_for_child_checkin(ret);
+	{
+		wait_for_child_checkin(ret, pidfd);
+		if (pidfd >= 0)
+			LINUX_SYSCALL(__NR_close, pidfd);
+	}
 
 	return ret;
 }
