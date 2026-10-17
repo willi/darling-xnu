@@ -12,16 +12,25 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
 
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
 
 #define LINUX_FIONREAD 0x541B
 #define LINUX_EINVAL 22
+#define LINUX_SOL_SOCKET 1
+#define LINUX_SO_TYPE 3
 
-// XNU's sooptcopyout() of an int option: as much of it as fits
+// XNU's getsockopt() and sooptcopyout() of an int option: as much of it as fits, none without a buffer; the length
+// is copied in and out (EFAULT without it)
 static long int_option(int value, void* optval, int* optlen)
 {
+	if (optlen == NULL)
+		return -EFAULT;
+	if (optval == NULL) {
+		*optlen = 0;
+		return 0;
+	}
+
 	int n = *optlen < (int) sizeof(value) ? *optlen : (int) sizeof(value);
 
 	if (n < 0)
@@ -35,9 +44,16 @@ static long int_option(int value, void* optval, int* optlen)
 // (SIOCINQ) is the same, but refuses a listening TCP socket, which has none
 static long so_nread(int fd, void* optval, int* optlen)
 {
-	unsigned long long cookie;
-	int n = 0;
-	long ret = linux_socket_cookie(fd, &cookie);
+	int n = 0, type;
+	unsigned int len = sizeof(type);
+	long ret;
+
+	// a socket? (ENOTSOCK if not)
+#ifdef __NR_socketcall
+	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_GETSOCKOPT, ((long[6]) { fd, LINUX_SOL_SOCKET, LINUX_SO_TYPE, &type, &len }));
+#else
+	ret = LINUX_SYSCALL(__NR_getsockopt, fd, LINUX_SOL_SOCKET, LINUX_SO_TYPE, &type, &len);
+#endif
 
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
