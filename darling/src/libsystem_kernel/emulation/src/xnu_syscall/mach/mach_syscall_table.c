@@ -2,10 +2,12 @@
 
 #include <darling/emulation/xnu_syscall/mach/impl/mach_time.h>
 #include <darling/emulation/xnu_syscall/mach/impl/mach_traps.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 
 __attribute__((visibility("hidden")))
 void* __mach_syscall_table[128] = {
 	[10] = _kernelrpc_mach_vm_allocate_trap_impl,
+	[11] = _kernelrpc_mach_vm_purgable_control_trap_impl,
 	[12] = _kernelrpc_mach_vm_deallocate_trap_impl,
 	[14] = _kernelrpc_mach_vm_protect_trap_impl,
 	[15] = _kernelrpc_mach_vm_map_trap_impl,
