@@ -10,10 +10,10 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/network/getpeername.h>
 
 #define LINUX_SOL_SOCKET 1
 #define LINUX_SO_ERROR 4
-#define LINUX_SYS_GETPEERNAME 7
 
 #define LINUX_POLLIN 0x0001
 #define LINUX_POLLOUT 0x0004

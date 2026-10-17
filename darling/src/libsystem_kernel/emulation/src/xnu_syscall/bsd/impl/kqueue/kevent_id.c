@@ -1,6 +1,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <libsimple/lock.h>
@@ -454,6 +455,9 @@ static void wl_sync_wait(struct workloop* wl, struct wl_knote* kn)
 
 enum wl_op { WL_ATTACH, WL_TOUCH, WL_DROP };
 
+// the debounce value at ext[EV_EXTIDX_WL_ADDR]: 8-byte aligned
+typedef uint64_t wl_value_t __attribute__((aligned(8)));
+
 // filt_wlupdate(): checks the debounce value at ext[EV_EXTIDX_WL_ADDR], and updates the owner and sync knotes.
 static int wl_update(struct workloop* wl, struct wl_knote* kn, struct kevent_qos_s* kev, enum wl_op op)
 {
@@ -466,7 +470,16 @@ static int wl_update(struct workloop* wl, struct wl_knote* kn, struct kevent_qos
 
 	if (addr != 0)
 	{
-		uint64_t value = __atomic_load_n((uint64_t*) addr, __ATOMIC_RELAXED);
+		// copyin_atomic64() fails an address that isn't 8-byte aligned. Aligned, the load is a single one on i386 too
+		// (whose ABI aligns a uint64_t to 4, so the plain type would make it a libatomic call).
+		if (addr & 7)
+			return EINVAL;
+#if UINTPTR_MAX < UINT64_MAX
+		// and a 32-bit process's copyin of an address beyond its address space fails with EFAULT
+		if (addr > UINTPTR_MAX)
+			return EFAULT;
+#endif
+		uint64_t value = __atomic_load_n((wl_value_t*) (uintptr_t) addr, __ATOMIC_RELAXED);
 
 		kev->ext[EV_EXTIDX_WL_VALUE] = value;
 		if ((value & mask) != (expected & mask))

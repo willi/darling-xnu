@@ -12,8 +12,8 @@
 #include <darling/emulation/conversion/network/recvmsg.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/network/sendmsg.h>
 
-#define LINUX_SYS_SENDMSG 16
 #define LINUX_MSG_NOSIGNAL 0x4000
 #define LINUX_SIGPIPE 13
 #define LINUX_ENOTSOCK 88
@@ -23,7 +23,11 @@
 #define PAGE_FDS 1024
 #define PAGES (NOSIGPIPE_FDS_MAX / PAGE_FDS)
 
-static unsigned long long* pages[PAGES];
+// i386's ABI aligns a long long to 4 bytes, and atomics on one through a pointer become libatomic calls, which
+// libsystem_kernel doesn't link. The pages are page-aligned, so every slot is 8-byte aligned: say so.
+typedef unsigned long long cookie_slot __attribute__((aligned(8)));
+
+static cookie_slot* pages[PAGES];
 static libsimple_lock_t nosigpipe_lock = LIBSIMPLE_LOCK_INITIALIZER;
 volatile int nosigpipe_fds;
 
@@ -33,17 +37,17 @@ void socket_nosigpipe_atfork_child(void)
 	libsimple_lock_init(&nosigpipe_lock);
 }
 
-static unsigned long long* slot(int fd)
+static cookie_slot* slot(int fd)
 {
 	if (fd < 0 || fd >= NOSIGPIPE_FDS_MAX)
 		return NULL;
-	unsigned long long* page = __atomic_load_n(&pages[fd / PAGE_FDS], __ATOMIC_ACQUIRE);
+	cookie_slot* page = __atomic_load_n(&pages[fd / PAGE_FDS], __ATOMIC_ACQUIRE);
 	return page != NULL ? &page[fd % PAGE_FDS] : NULL;
 }
 
-static unsigned long long* slot_make_locked(int fd)
+static cookie_slot* slot_make_locked(int fd)
 {
-	unsigned long long* s = slot(fd);
+	cookie_slot* s = slot(fd);
 
 	if (s != NULL || fd < 0 || fd >= NOSIGPIPE_FDS_MAX)
 		return s;
@@ -56,11 +60,11 @@ static unsigned long long* slot_make_locked(int fd)
 #endif
 	if ((unsigned long) page > -4096UL)
 		return NULL;
-	__atomic_store_n(&pages[fd / PAGE_FDS], (unsigned long long*) page, __ATOMIC_RELEASE);
+	__atomic_store_n(&pages[fd / PAGE_FDS], (cookie_slot*) page, __ATOMIC_RELEASE);
 	return slot(fd);
 }
 
-static void slot_set_locked(unsigned long long* s, unsigned long long cookie)
+static void slot_set_locked(cookie_slot* s, unsigned long long cookie)
 {
 	if (*s == 0 && cookie != 0)
 		__atomic_add_fetch(&nosigpipe_fds, 1, __ATOMIC_RELAXED);
@@ -87,7 +91,7 @@ static int cookie_flagged_locked(unsigned long long cookie)
 static int socket_flagged(int fd, unsigned long long cookie)
 {
 	unsigned long long mask = sigsafe_lock(&nosigpipe_lock);
-	unsigned long long* s = slot(fd);
+	cookie_slot* s = slot(fd);
 	int flagged = s != NULL && *s == cookie;
 
 	if (!flagged && cookie_flagged_locked(cookie)) {
@@ -111,7 +115,7 @@ long socket_nosigpipe_set(int fd, int on)
 	ret = 0;
 	mask = sigsafe_lock(&nosigpipe_lock);
 	if (on) {
-		unsigned long long* s = slot_make_locked(fd);
+		cookie_slot* s = slot_make_locked(fd);
 		if (s != NULL)
 			slot_set_locked(s, cookie);
 		else if (fd < NOSIGPIPE_FDS_MAX)
@@ -145,7 +149,7 @@ long socket_nosigpipe_get(int fd, int* on)
 static void forget(int fd, unsigned long long cookie)
 {
 	unsigned long long mask = sigsafe_lock(&nosigpipe_lock);
-	unsigned long long* s = slot(fd);
+	cookie_slot* s = slot(fd);
 
 	if (s != NULL && *s == cookie)
 		slot_set_locked(s, 0);
@@ -154,7 +158,7 @@ static void forget(int fd, unsigned long long cookie)
 
 int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, long* result)
 {
-	unsigned long long* s = slot(fd);
+	cookie_slot* s = slot(fd);
 	unsigned long long cookie = s != NULL ? __atomic_load_n(s, __ATOMIC_ACQUIRE) : 0;
 	struct linux_msghdr msg = { .msg_iov = (struct iovec*) iov, .msg_iovlen = iovcnt };
 	long ret;
@@ -195,7 +199,7 @@ long socket_send_done(int fd, long ret, int msg_nosignal, int linux_raised)
 
 void socket_nosigpipe_close(int fd)
 {
-	unsigned long long* s = slot(fd);
+	cookie_slot* s = slot(fd);
 
 	if (s == NULL || __atomic_load_n(s, __ATOMIC_ACQUIRE) == 0)
 		return;
@@ -206,12 +210,12 @@ void socket_nosigpipe_close(int fd)
 
 void socket_nosigpipe_dup(int fd, int copy)
 {
-	unsigned long long* s = slot(fd);
+	cookie_slot* s = slot(fd);
 
 	if (s == NULL || copy == fd || __atomic_load_n(s, __ATOMIC_ACQUIRE) == 0)
 		return;
 	unsigned long long mask = sigsafe_lock(&nosigpipe_lock);
-	unsigned long long* c = slot_make_locked(copy);
+	cookie_slot* c = slot_make_locked(copy);
 	if (c != NULL && *s != 0)
 		slot_set_locked(c, *s);
 	sigsafe_unlock(&nosigpipe_lock, mask);
