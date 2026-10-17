@@ -50,8 +50,6 @@ extern int __simple_sprintf(char* buf, const char* format, ...);
 // namei(): copyinstr() of a path of MAXPATHLEN bytes or more is ENAMETOOLONG
 #define XNU_MAXPATHLEN 1024
 
-#define LINUX_O_ACCMODE 03
-
 // Whether two objects are on the same mount: 1 or 0, or a negative XNU errno. When Linux can't tell, they are: a
 // missed EXDEV only means a copy where XNU would refuse, which copying callers then do anyway.
 static long clone_same_mount(int adfd, const char* a, int aflags, const char* b)
