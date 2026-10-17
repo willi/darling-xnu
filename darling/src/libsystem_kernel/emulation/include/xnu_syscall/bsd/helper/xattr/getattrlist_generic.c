@@ -22,8 +22,6 @@
 #endif
 
 #define LINUX_O_PATH 010000000
-#define LINUX_S_IFMT 0170000
-#define LINUX_S_IFDIR 0040000
 #define XNU_MAXPATHLEN 1024
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))

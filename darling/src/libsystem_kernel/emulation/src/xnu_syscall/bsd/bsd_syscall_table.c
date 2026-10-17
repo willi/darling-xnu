@@ -129,6 +129,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/time/setitimer.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/time/utimes.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/access.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/unistd/access_extended.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/chdir.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/chflags.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/chmod.h>
@@ -384,6 +385,7 @@ void* __bsd_syscall_table[600] = {
 	[274] = sys_sysctlbyname,
 	[282] = sys_chmod_extended,
 	[283] = sys_fchmod_extended,
+	[284] = sys_access_extended,
 	[285] = sys_settid,
 	[286] = sys_gettid,
 	[294] = sys_shared_region_check_np,

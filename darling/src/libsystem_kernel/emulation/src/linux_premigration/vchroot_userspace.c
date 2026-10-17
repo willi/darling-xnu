@@ -16,6 +16,7 @@
 #	define LINUX_ENOENT ENOENT
 #	define LINUX_ELOOP ELOOP
 #	define LINUX_ENAMETOOLONG ENAMETOOLONG
+#	define LINUX_EBADF EBADF
 
 #	define LINUX_S_IFMT S_IFMT
 #	define LINUX_S_IFLNK S_IFLNK
@@ -63,9 +64,6 @@ extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 extern void* memmove(void* dest, const void* src, __SIZE_TYPE__ n);
 extern int memcmp(const void* dest, const void* src, __SIZE_TYPE__ n);
 
-#define LINUX_S_IFMT 00170000
-#define LINUX_S_IFLNK 0120000
-
 #define __simple_printf(...)
 // #define __simple_printf __simple_kprintf // For bug hunting
 
@@ -73,7 +71,7 @@ extern int memcmp(const void* dest, const void* src, __SIZE_TYPE__ n);
 
 static bool next_component(const char* from, const char** end);
 
-static char prefix_path[4096] = {0}; // MUST NOT end with '/'
+static char prefix_path[VCHROOT_PATH_MAX] = {0}; // MUST NOT end with '/'
 static int prefix_path_len = -1;
 
 static const char EXIT_PATH[] = "/Volumes/SystemRoot";
@@ -96,7 +94,7 @@ struct context
 	const char* current_root;
 	int current_root_len;
 
-	char current_path[4096];
+	char current_path[VCHROOT_PATH_MAX];
 	int current_path_len;
 
 	int symlink_depth;
@@ -209,6 +207,9 @@ int vchroot_expand(struct vchroot_expand_args* args)
 #ifndef TEST
 			__simple_printf("    dfd %d -> err %d!\n", args->dfd, rv);
 #endif
+			// a descriptor that isn't open has no /proc/self/fd entry; namei() answers EBADF for it
+			if (rv == -LINUX_ENOENT && args->dfd != -100)
+				return -LINUX_EBADF;
 			return rv;
 		}
 		
@@ -521,6 +522,18 @@ int vchroot_fdpath(struct vchroot_fdpath_args* args)
 #endif
 
 	return 0;
+}
+
+int vchroot_is_root(const char* linux_path)
+{
+#ifndef TEST
+	if (prefix_path_len == -1)
+		init_vchroot_path();
+#endif
+	// vchroot_expand() makes the root the prefix itself, or "/" without one
+	if (prefix_path_len <= 0)
+		return strcmp(linux_path, "/") == 0;
+	return strcmp(linux_path, prefix_path) == 0;
 }
 
 int vchroot_unexpand(struct vchroot_unexpand_args* args)

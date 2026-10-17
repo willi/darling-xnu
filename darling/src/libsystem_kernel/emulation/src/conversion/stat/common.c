@@ -62,7 +62,7 @@ void stat_linux_to_bsd64(const struct linux_stat* lstat, struct stat64* stat)
 #define LINUX_ST_VALID 0x0020
 
 // Linux's ST_* bits as XNU's MNT_* ones (MNT_LOCAL is mounts.c's)
-static unsigned int statfs_flags_linux_to_bsd(long lflags)
+unsigned int statfs_flags_linux_to_bsd(long lflags)
 {
 	unsigned int flags = 0;
 

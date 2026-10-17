@@ -9,21 +9,14 @@
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 
 #ifndef __NR_fstatat64
 #	define __NR_fstatat64 __NR_newfstatat
 #endif
 
-#define LINUX_S_IFMT 0170000
-#define LINUX_S_IFDIR 0040000
 #define LINUX_O_PATH 010000000
-#define LINUX_STATX_MNT_ID 0x00001000U
-// struct statx's offsets: stx_mask, stx_dev_major and stx_dev_minor, stx_mnt_id
-#define LINUX_STX_MASK 0x00
-#define LINUX_STX_DEV_MAJOR 0x88
-#define LINUX_STX_DEV_MINOR 0x8C
-#define LINUX_STX_MNT_ID 0x90
 // what Linux's fstatfs() says of descriptors that aren't files
 #define LINUX_PIPEFS_MAGIC 0x50495045
 #define LINUX_SOCKFS_MAGIC 0x534F434B
@@ -146,6 +139,26 @@ static long each_mount(int (*each)(const struct mountinfo* m, void* ctx), void* 
 	return rv;
 }
 
+int mounts_fs_has_files(long f_type)
+{
+	return f_type != LINUX_PIPEFS_MAGIC && f_type != LINUX_SOCKFS_MAGIC && f_type != LINUX_ANON_INODE_FS_MAGIC;
+}
+
+long mounts_id(int dfd, const char* path, int flags, unsigned long long* id)
+{
+	struct linux_path_statx sx;
+	long ret = linux_path_statx(dfd, path, flags, LINUX_STATX_MNT_ID, &sx);
+
+	if (ret == -ENOSYS || ret == -EPERM || ret == -EINVAL)
+		return 0;
+	if (ret < 0)
+		return ret;
+	if (!(sx.mask & LINUX_STATX_MNT_ID))
+		return 0;
+	*id = sx.mnt_id;
+	return 1;
+}
+
 static long linux_fstatfs(int fd, struct bsd_statfs64* buf)
 {
 	struct linux_statfs64 lbuf;
@@ -162,8 +175,7 @@ static long linux_fstatfs(int fd, struct bsd_statfs64* buf)
 #endif
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
-	if (lbuf.f_type == LINUX_PIPEFS_MAGIC || lbuf.f_type == LINUX_SOCKFS_MAGIC ||
-		lbuf.f_type == LINUX_ANON_INODE_FS_MAGIC)
+	if (!mounts_fs_has_files(lbuf.f_type))
 		return -EINVAL;
 
 	memset(buf, 0, sizeof(*buf));
@@ -257,7 +269,7 @@ static int find_mount(const struct mountinfo* m, void* ctx)
 
 long mounts_fstatfs(int fd, struct bsd_statfs64* buf)
 {
-	unsigned char stx[256] __attribute__((aligned(8)));
+	struct linux_path_statx sx;
 	long ret = linux_fstatfs(fd, buf);
 
 	if (ret < 0)
@@ -265,14 +277,13 @@ long mounts_fstatfs(int fd, struct bsd_statfs64* buf)
 
 	// the mount the object is on: exact, for a removed file and under a mount over another too; before Linux 5.8
 	// (no STATX_MNT_ID), the first one of its device, for its type
-	ret = LINUX_SYSCALL(__NR_statx, fd, "", LINUX_AT_EMPTY_PATH, LINUX_STATX_MNT_ID, stx);
-	if (ret == 0)
+	if (linux_path_statx(fd, "", LINUX_AT_EMPTY_PATH, LINUX_STATX_MNT_ID, &sx) == 0)
 	{
 		struct find_mount f = {
-			.id = *(unsigned long long*) (stx + LINUX_STX_MNT_ID),
-			.major = *(unsigned int*) (stx + LINUX_STX_DEV_MAJOR),
-			.minor = *(unsigned int*) (stx + LINUX_STX_DEV_MINOR),
-			.by_dev = !(*(unsigned int*) (stx + LINUX_STX_MASK) & LINUX_STATX_MNT_ID),
+			.id = sx.mnt_id,
+			.major = sx.dev_major,
+			.minor = sx.dev_minor,
+			.by_dev = !(sx.mask & LINUX_STATX_MNT_ID),
 			.buf = buf,
 		};
 		if (each_mount(find_mount, &f) > 0)
@@ -307,7 +318,7 @@ static int list_mount(const struct mountinfo* m, void* ctx)
 {
 	struct list_mounts* l = ctx;
 	struct linux_stat st;
-	unsigned char stx[256] __attribute__((aligned(8)));
+	unsigned long long id;
 	long ret = 0;
 
 	// a file bound over another (a container's /etc/hosts) isn't a file system to list
@@ -319,9 +330,7 @@ static int list_mount(const struct mountinfo* m, void* ctx)
 	if (fd < 0)
 		return 0;
 	// nor is one another is mounted over: its mount point opens the one on top, whose statfs() it isn't
-	if (LINUX_SYSCALL(__NR_statx, fd, "", LINUX_AT_EMPTY_PATH, LINUX_STATX_MNT_ID, stx) == 0 &&
-		(*(unsigned int*) (stx + LINUX_STX_MASK) & LINUX_STATX_MNT_ID) &&
-		*(unsigned long long*) (stx + LINUX_STX_MNT_ID) != m->id)
+	if (mounts_id(fd, "", LINUX_AT_EMPTY_PATH, &id) > 0 && id != m->id)
 		ret = -1;
 	else if (l->buf)
 		ret = linux_fstatfs(fd, &l->buf[l->n]);

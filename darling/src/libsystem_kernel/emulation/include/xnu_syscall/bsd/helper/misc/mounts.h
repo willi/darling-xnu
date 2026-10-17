@@ -20,6 +20,16 @@ long mounts_list(struct bsd_statfs64* buf, long count);
 // the root directory of a file system mounts_*statfs() described, opened O_PATH; or an error
 long mounts_open_root(const struct bsd_statfs64* fs);
 
+// The Linux mount an object is on (XNU's vnode_mount()), by Linux's mount ID: a file system's device numbers don't tell,
+// as an overlay reports its own for directories and its layers' for files. 1 and the ID, or 0 when Linux can't tell
+// (before Linux 5.8, without STATX_MNT_ID; or without statx() at all: ENOSYS, or EPERM from a seccomp profile), or a
+// negative XNU errno. dfd, path and flags are statx()'s.
+long mounts_id(int dfd, const char* path, int flags, unsigned long long* id);
+
+// whether Linux statfs()'s f_type is a file system of files (what an XNU descriptor is a vnode of), and not the one of
+// pipes, of sockets or of anonymous inodes (epoll, eventfd, ...)
+int mounts_fs_has_files(long f_type);
+
 // a file system's volume name: its mount point's last component, and "Macintosh HD" for the root, where a Mac's
 // iOS Simulator files are
 const char* mounts_volume_name(const struct bsd_statfs64* fs);

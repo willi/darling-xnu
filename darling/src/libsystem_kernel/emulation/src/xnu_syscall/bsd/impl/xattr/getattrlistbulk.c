@@ -25,8 +25,6 @@
 #define LINUX_SEEK_SET 0
 #define LINUX_SEEK_CUR 1
 
-#define LINUX_S_IFMT 0170000
-#define LINUX_S_IFDIR 0040000
 
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
 extern void* memset(void* s, int c, __SIZE_TYPE__ n);
