@@ -2,6 +2,7 @@
 
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/fcntl/fcntl.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 
 #include <darlingserver/rpc.h>
@@ -17,7 +18,9 @@ int _dserver_rpc_kqchan_proc_open_4libkqueue(int32_t pid, uint32_t flags, int* o
 int _dup_4libkqueue(int fd) {
 	int ret;
 
-	ret = LINUX_SYSCALL1(__NR_dup, fd);
+	// close-on-exec, as the other descriptors libkqueue makes are: a knote's copy must not keep the socket (or
+	// file) open in a program this one execs
+	ret = LINUX_SYSCALL3(__NR_fcntl, fd, LINUX_F_DUPFD_CLOEXEC, 0);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 
