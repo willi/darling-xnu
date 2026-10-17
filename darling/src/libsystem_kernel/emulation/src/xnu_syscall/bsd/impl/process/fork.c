@@ -5,6 +5,7 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/signal/duct_signals.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
@@ -25,7 +26,6 @@
 #include <darlingserver/rpc.h>
 
 extern _libkernel_functions_t _libkernel_functions;
-extern int _mach_fork_parent(void);
 extern void kqueue_atfork(void);
 
 libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
@@ -37,6 +37,30 @@ libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
 // so its own forks don't stop, and exec drops it.
 VISIBLE int __darling_fork_stop_child;
 #endif
+
+// In the parent: returns once darlingserver has registered the child, whose task then has the special ports
+// this process had when it forked; the caller may change them as soon as fork() returns (launchd resets its
+// bootstrap port). The wait is for this child: a pidfd tells it from an earlier process with its PID, and
+// shows it dying before it checks in. Kernels without pidfd_open get by on the PID.
+static void wait_for_child_checkin(int child)
+{
+	int pidfd = LINUX_SYSCALL(__NR_pidfd_open, child, 0);
+	int result;
+
+	do
+		result = dserver_rpc_fork_wait_for_child(child, pidfd < 0 ? -1 : pidfd);
+	while (result == -LINUX_EINTR);
+
+	if (pidfd >= 0)
+		LINUX_SYSCALL(__NR_close, pidfd);
+
+	// -ESRCH: the child died before it checked in
+	if (result < 0 && result != -LINUX_ESRCH)
+	{
+		__simple_printf("fork: waiting for the child's darlingserver checkin failed: %d\n", result);
+		__simple_abort();
+	}
+}
 
 long sys_fork(void)
 {
@@ -143,13 +167,8 @@ long sys_fork_special_ports_locked(void)
 		// registered, on our own socket: a signal handler may run now
 		signals_restore(signal_mask);
 	}
-#ifndef VARIANT_DYLD
 	else if (ret > 0)
-	{
-		// wait for the child's darlingserver checkin
-		_mach_fork_parent();
-	}
-#endif
+		wait_for_child_checkin(ret);
 
 	return ret;
 }
