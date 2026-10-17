@@ -110,7 +110,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/misc/sha256.c
 	src/xnu_syscall/bsd/helper/misc/fdpath.c
 	src/xnu_syscall/bsd/helper/misc/mounts.c
-	src/xnu_syscall/bsd/helper/misc/path_access.c
+	src/xnu_syscall/bsd/helper/misc/linux_path.c
 	src/xnu_syscall/bsd/helper/xattr/attrlist_pack.c
 	src/xnu_syscall/bsd/helper/xattr/xattr_names.c
 	src/xnu_syscall/bsd/helper/misc/sysctl_hw.c

@@ -9,6 +9,8 @@
 #define LINUX_AT_REMOVEDIR			0x200
 #define LINUX_AT_SYMLINK_FOLLOW		0x400
 #define LINUX_AT_EMPTY_PATH		0x1000
+// faccessat2()'s: as the effective ids
+#define LINUX_AT_EACCESS		0x200
 
 #define BSD_AT_FDCWD	-2
 #define BSD_AT_SYMLINK_NOFOLLOW		0x20

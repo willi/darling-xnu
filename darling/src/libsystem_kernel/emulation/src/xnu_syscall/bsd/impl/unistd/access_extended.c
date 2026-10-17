@@ -8,7 +8,7 @@
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/misc/path_access.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getuid.h>
 
 extern char* strcpy(char* dst, const char* src);
@@ -94,14 +94,14 @@ static int accessx_lookup(const char* name, int wantparent, struct accessx_node*
 		return -errno_linux_to_bsd(ret);
 
 	// the lookup itself, with the real ids' search permissions; vchroot_expand() doesn't check any
-	ret = path_access(node->vc.path, 0, 0);
+	ret = linux_path_access(LINUX_AT_FDCWD, node->vc.path, 0, 0);
 	if (!ret)
-		ret = path_stat(node->vc.path, &node->st, 0);
+		ret = linux_path_stat(LINUX_AT_FDCWD, node->vc.path, 0, &node->st);
 	if (!ret && wantparent)
-		ret = path_parent(node->vc.path, node->parent);
+		ret = linux_path_parent(node->vc.path, node->parent);
 	if (!ret && wantparent)
-		ret = path_stat(node->parent, &node->pst, 0);
-	return ret;
+		ret = linux_path_stat(LINUX_AT_FDCWD, node->parent, 0, &node->pst);
+	return -ret;
 }
 
 // access1(): one descriptor's flags against what the lookup found
@@ -160,7 +160,7 @@ static int accessx_check(const struct accessx_node* node, int uflags)
 	// the file's and the directory's owners
 	if (rights & KAUTH_VNODE_DELETE)
 	{
-		ret = path_access(node->parent, XNU_W_OK, 0);
+		ret = -linux_path_access(LINUX_AT_FDCWD, node->parent, XNU_W_OK, 0);
 		if (ret)
 			return ret;
 		if ((node->pst.st_mode & LINUX_S_ISVTX) && node->st.st_uid != uid && node->pst.st_uid != uid)
@@ -186,7 +186,7 @@ static int accessx_check(const struct accessx_node* node, int uflags)
 		mode |= XNU_W_OK;
 	if (rights & KAUTH_VNODE_EXECUTE)
 		mode |= XNU_X_OK;
-	return mode ? path_access(node->vc.path, mode, 0) : 0;
+	return mode ? -linux_path_access(LINUX_AT_FDCWD, node->vc.path, mode, 0) : 0;
 }
 
 // entries: the descriptors, then the names they point to (by offset from entries; 0 is the previous

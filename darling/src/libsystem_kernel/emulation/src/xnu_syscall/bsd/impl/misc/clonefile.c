@@ -8,7 +8,8 @@
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/misc/path_access.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 
 extern char* strcpy(char* dst, const char* src);
 extern int strcmp(const char* a, const char* b);
@@ -37,26 +38,38 @@ extern int __simple_sprintf(char* buf, const char* format, ...);
 #define LINUX_F_GETFL 3
 #define LINUX_O_ACCMODE 03
 #define LINUX_O_WRONLY 01
-#define LINUX_PIPEFS_MAGIC 0x50495045
-#define LINUX_SOCKFS_MAGIC 0x534F434B
-#define LINUX_ANON_INODE_FS_MAGIC 0x09041934
+
+// Whether two objects are on the same mount: 1 or 0, or a negative XNU errno. When Linux can't tell, they are: a
+// missed EXDEV only means a copy where XNU would refuse, which copying callers then do anyway.
+static long clone_same_mount(int adfd, const char* a, int aflags, const char* b)
+{
+	unsigned long long ida, idb;
+	long ret = mounts_id(adfd, a, aflags, &ida);
+
+	if (ret <= 0)
+		return ret < 0 ? ret : 1;
+	ret = mounts_id(LINUX_AT_FDCWD, b, 0, &idb);
+	if (ret <= 0)
+		return ret < 0 ? ret : 1;
+	return ida == idb;
+}
 
 // A directory can't be cloned if it's the root or a mount point (vnode_isvroot, vnode_ismount): its
-// parent is itself, or on another mount. path is a resolved Linux path (path_parent()'s).
-static int clone_dir_is_mount(const char* path)
+// parent is itself, or on another mount. 0, or a negative XNU errno. path is a resolved Linux path.
+static long clone_dir_is_mount(const char* path)
 {
-	char parent[sizeof(((struct vchroot_expand_args*)0)->path)];
-	int ret;
+	char parent[VCHROOT_PATH_MAX];
+	long ret;
 
-	ret = path_parent(path, parent);
-	if (ret)
+	ret = linux_path_parent(path, parent);
+	if (ret < 0)
 		return ret;
 	if (strcmp(parent, path) == 0)
-		return EINVAL;
-	ret = path_same_mount(path, parent);
+		return -EINVAL;
+	ret = clone_same_mount(LINUX_AT_FDCWD, path, 0, parent);
 	if (ret < 0)
-		return -ret;
-	return ret ? 0 : EINVAL;
+		return ret;
+	return ret ? 0 : -EINVAL;
 }
 
 // the source as clonefile_internal() checks it, and the target's lookup, mount and directory permission.
@@ -66,16 +79,16 @@ static long clone_to(const char* src_path, const char* real_path, const struct l
 {
 	struct vchroot_expand_args vc;
 	struct linux_stat st, dst_st;
-	char parent[sizeof(vc.path)];
+	char parent[VCHROOT_PATH_MAX];
 	unsigned int type = src->st_mode & LINUX_S_IFMT;
-	int ret;
+	long ret;
 
 	// a regular file, a symbolic link, or a directory that isn't a volume's root or a mount point
 	if (type == LINUX_S_IFDIR)
 	{
 		ret = clone_dir_is_mount(real_path);
-		if (ret)
-			return -ret;
+		if (ret < 0)
+			return ret;
 	}
 	else if (type != LINUX_S_IFREG && type != LINUX_S_IFLNK)
 		return -EINVAL;
@@ -90,30 +103,30 @@ static long clone_to(const char* src_path, const char* real_path, const struct l
 		return errno_linux_to_bsd(ret);
 
 	// namei(CREATE): the target must not exist, and its directory must
-	ret = path_stat(vc.path, &dst_st, 1);
+	ret = linux_path_stat(LINUX_AT_FDCWD, vc.path, LINUX_AT_SYMLINK_NOFOLLOW, &dst_st);
 	if (ret == 0)
 		return -EEXIST;
-	if (ret != ENOENT)
-		return -ret;
-	ret = path_parent(vc.path, parent);
+	if (ret != -ENOENT)
+		return ret;
+	ret = linux_path_parent(vc.path, parent);
 	if (!ret)
-		ret = path_stat(parent, &st, 0);
-	if (ret)
-		return -ret;
+		ret = linux_path_stat(LINUX_AT_FDCWD, parent, 0, &st);
+	if (ret < 0)
+		return ret;
 	if ((st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR)
 		return -ENOTDIR;
 
 	// the source's mount: a symbolic link's is its directory's (Linux follows a link it's asked about)
 	if (type == LINUX_S_IFLNK)
 	{
-		char link_dir[sizeof(vc.path)];
-		ret = path_parent(real_path, link_dir);
-		if (ret)
-			return -ret;
-		ret = path_same_mount(parent, link_dir);
+		char link_dir[VCHROOT_PATH_MAX];
+		ret = linux_path_parent(real_path, link_dir);
+		if (ret < 0)
+			return ret;
+		ret = clone_same_mount(LINUX_AT_FDCWD, link_dir, 0, parent);
 	}
 	else
-		ret = path_same_mount(parent, src_path);
+		ret = clone_same_mount(LINUX_AT_FDCWD, src_path, 0, parent);
 	if (ret < 0)
 		return ret;
 	if (!ret)
@@ -123,11 +136,11 @@ static long clone_to(const char* src_path, const char* real_path, const struct l
 	// (KAUTH_VNODE_GENERIC_READ_BITS: posix read, also when fclonefileat's open file has read the data). A
 	// symbolic link's own permissions grant everything (Linux's are 0777), and asking Linux about a link would
 	// ask about what it points to.
-	ret = path_access(parent, XNU_W_OK, 1);
+	ret = linux_path_access(LINUX_AT_FDCWD, parent, XNU_W_OK, LINUX_AT_EACCESS);
 	if (!ret && type != LINUX_S_IFLNK)
-		ret = path_access(src_path, XNU_R_OK, 1);
-	if (ret)
-		return -ret;
+		ret = linux_path_access(LINUX_AT_FDCWD, src_path, XNU_R_OK, LINUX_AT_EACCESS);
+	if (ret < 0)
+		return ret;
 
 	// VNOP_CLONEFILE
 	return -ENOTSUP;
@@ -150,9 +163,9 @@ long sys_clonefileat(int src_fd, const char* src_path, int dest_fd, const char* 
 	ret = vchroot_expand(&vc);
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
-	ret = path_stat(vc.path, &st, flags & XNU_CLONE_NOFOLLOW);
-	if (ret)
-		return -ret;
+	ret = linux_path_stat(LINUX_AT_FDCWD, vc.path, (flags & XNU_CLONE_NOFOLLOW) ? LINUX_AT_SYMLINK_NOFOLLOW : 0, &st);
+	if (ret < 0)
+		return ret;
 
 	return clone_to(vc.path, vc.path, &st, dest_fd, dest_path, flags);
 }
@@ -161,8 +174,9 @@ long sys_fclonefileat(int src_fd, int dest_fd, const char* dest_path, uint32_t f
 {
 	struct linux_statfs64 sfs;
 	struct linux_stat st;
-	char path[32], real_path[sizeof(((struct vchroot_expand_args*)0)->path)];
-	int ret, fl;
+	char path[32], real_path[VCHROOT_PATH_MAX];
+	long ret;
+	int fl;
 
 	if (flags & ~XNU_CLONE_FLAGS)
 		return -EINVAL;
@@ -178,7 +192,7 @@ long sys_fclonefileat(int src_fd, int dest_fd, const char* dest_path, uint32_t f
 #endif
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
-	if (sfs.f_type == LINUX_PIPEFS_MAGIC || sfs.f_type == LINUX_SOCKFS_MAGIC || sfs.f_type == LINUX_ANON_INODE_FS_MAGIC)
+	if (!mounts_fs_has_files(sfs.f_type))
 		return -ENOTSUP;
 	// opened for reading (FREAD). Darling opens a symbolic link for O_SYMLINK as O_PATH, which leaves the
 	// access mode as it was given.
@@ -187,9 +201,9 @@ long sys_fclonefileat(int src_fd, int dest_fd, const char* dest_path, uint32_t f
 
 	// the open file, through /proc, for its permissions; and where it is, for a directory's mount check
 	__simple_sprintf(path, "/proc/self/fd/%d", src_fd);
-	ret = path_stat(path, &st, 0);
-	if (ret)
-		return -ret;
+	ret = linux_path_stat(LINUX_AT_FDCWD, path, 0, &st);
+	if (ret < 0)
+		return ret;
 #ifdef __NR_readlink
 	ret = LINUX_SYSCALL(__NR_readlink, path, real_path, sizeof(real_path) - 1);
 #else
