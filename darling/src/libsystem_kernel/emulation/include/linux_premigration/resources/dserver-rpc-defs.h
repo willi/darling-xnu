@@ -14,6 +14,8 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigprocmask.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/conversion/mman/duct_mman.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 
 #include <darlingserver/rpc-supplement.h>
 
@@ -132,11 +134,18 @@ retry:
 						__simple_abort();
 					}
 
+					// what was mapped there goes (vm_map with VM_FLAGS_OVERWRITE, memory made shared)
+					unsigned long long purgeable_mask;
+					bool purgeable_locked = (mmap_call->flags & LINUX_MAP_FIXED)
+						&& purgeable_unmap_begin((uintptr_t) mmap_call->address, mmap_call->length, &purgeable_mask);
+
 #ifdef __NR_mmap2
 					call_ret = (void*)LINUX_SYSCALL(__NR_mmap2, mmap_call->address, mmap_call->length, mmap_call->protection, mmap_call->flags, mmap_call->fd, mmap_call->offset / 4096);
 #else
 					call_ret = (void*)LINUX_SYSCALL(__NR_mmap, mmap_call->address, mmap_call->length, mmap_call->protection, mmap_call->flags, mmap_call->fd, mmap_call->offset);
 #endif
+					purgeable_unmap_end(purgeable_locked, purgeable_mask, (unsigned long) call_ret <= (unsigned long) -4096,
+						(uintptr_t) mmap_call->address, mmap_call->length);
 
 					if (mmap_call->fd >= 0) {
 						close_internal(mmap_call->fd);
@@ -173,7 +182,12 @@ retry:
 						.errno_result = 0,
 					};
 
+					unsigned long long purgeable_mask;
+					bool purgeable_locked = purgeable_unmap_begin((uintptr_t) munmap_call->address, munmap_call->length,
+						&purgeable_mask);
 					call_ret = LINUX_SYSCALL2(__NR_munmap, munmap_call->address, munmap_call->length);
+					purgeable_unmap_end(purgeable_locked, purgeable_mask, call_ret == 0, (uintptr_t) munmap_call->address,
+						munmap_call->length);
 
 					if (call_ret < 0) {
 						reply.return_value = -1;

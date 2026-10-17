@@ -59,6 +59,8 @@ long sys_fork_special_ports_locked(void)
 	{
 		// in the child
 		__darling_fork_child();
+		// before a signal handler can unmap memory, which takes the table's lock
+		purgeable_atfork_child();
 
 #ifndef VARIANT_DYLD
 		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
@@ -73,7 +75,6 @@ long sys_fork_special_ports_locked(void)
 		// we don't need to close it ourselves.
 		// that should also take care of closing descriptors for any other threads.
 		guard_table_postfork_child();
-		purgeable_atfork_child();
 
 		// create a new dserver RPC socket
 		__dserver_per_thread_socket_refresh();

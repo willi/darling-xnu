@@ -71,6 +71,8 @@ extern void __simple_printf(const char* format, ...);
 // trap can't serve a call, and what libsyscall's wrappers (mach_port.c, mach_vm.c, host.c) take to send the MIG
 // message instead, which darlingserver may handle; any other result goes back to the caller as the answer.
 // (A number XNU itself has no trap for, kern_invalid in its table, raises EXC_SYSCALL there.)
+// So a trap whose wrapper falls back must be here, or have a MIG routine in darlingserver that answers: an unsafe stub
+// there (dtape_stub_unsafe) stops the server, and every process with it.
 long __unknown_mach_syscall(int nr, ...)
 {
 	__simple_printf("Unimplemented mach trap (%d)\n", nr);
