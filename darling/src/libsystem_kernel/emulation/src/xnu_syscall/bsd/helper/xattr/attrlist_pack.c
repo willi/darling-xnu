@@ -7,6 +7,7 @@
 #include <darling/emulation/conversion/fcntl/open.h>
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
@@ -291,11 +292,11 @@ static uint32_t user_access(int dirfd, const char* name)
 {
 	uint32_t access = 0;
 	// R_OK, W_OK and X_OK are the same on XNU
-	if (LINUX_SYSCALL(__NR_faccessat, dirfd, name, LINUX_R_OK) == 0)
+	if (linux_path_access(dirfd, name, LINUX_R_OK, 0) == 0)
 		access |= LINUX_R_OK;
-	if (LINUX_SYSCALL(__NR_faccessat, dirfd, name, LINUX_W_OK) == 0)
+	if (linux_path_access(dirfd, name, LINUX_W_OK, 0) == 0)
 		access |= LINUX_W_OK;
-	if (LINUX_SYSCALL(__NR_faccessat, dirfd, name, LINUX_X_OK) == 0)
+	if (linux_path_access(dirfd, name, LINUX_X_OK, 0) == 0)
 		access |= LINUX_X_OK;
 	return access;
 }

@@ -8,6 +8,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/conversion/common_at.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
 
 extern char* strcpy(char* dst, const char* src);
 
@@ -33,11 +34,11 @@ long sys_faccessat(int fd, const char* filename, int amode, int flag)
 	linux_flags = atflags_bsd_to_linux(flag);
 	if (linux_flags == LINUX_AT_INVALID)
 		return -EINVAL;
+	// faccessat2()'s flags (Linux's AT_REMOVEDIR is its AT_EACCESS); AT_EACCESS, which atflags_bsd_to_linux() drops,
+	// checks as the effective ids
+	linux_flags &= LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH;
+	if (flag & BSD_AT_EACCESS)
+		linux_flags |= LINUX_AT_EACCESS;
 
-	ret = LINUX_SYSCALL(__NR_faccessat, vc.dfd, vc.path, amode, linux_flags);
-
-	if (ret < 0)
-		ret = errno_linux_to_bsd(ret);
-
-	return ret;
+	return linux_path_access(vc.dfd, vc.path, amode, linux_flags);
 }
