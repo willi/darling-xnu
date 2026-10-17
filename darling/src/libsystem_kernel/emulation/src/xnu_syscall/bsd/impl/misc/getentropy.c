@@ -9,13 +9,17 @@
 
 long sys_getentropy(void* buf, unsigned long size)
 {
-	int ret;
+	long ret;
+
+	// XNU (bsd/dev/random/randomdev.c) gives at most 256 bytes, as OpenBSD's getentropy() does
+	if (size > 256)
+		return -EINVAL;
 
 	ret = LINUX_SYSCALL(__NR_getrandom, buf, size, 0);
+	// a failure is negative, and compared unsigned with size it looked like a full read
 	if (ret < 0)
-		ret = errno_linux_to_bsd(ret);
-
-	if (ret < size)
+		return errno_linux_to_bsd(ret);
+	if ((unsigned long) ret < size)
 		return -EIO;
 
 	return 0;
