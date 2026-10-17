@@ -370,6 +370,7 @@ void* __bsd_syscall_table[600] = {
 	[239] = sys_fremovexattr,
 	[240] = sys_listxattr,
 	[241] = sys_flistxattr,
+	[242] = sys_fsctl,
 	[243] = sys_initgroups,
 	[244] = sys_posix_spawn,
 	[245] = sys_ffsctl,

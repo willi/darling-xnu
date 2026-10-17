@@ -353,11 +353,12 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 				kern_printf("sigexc: emulating SIGTSTP/SIGSTOP\n");
 				LINUX_SYSCALL(__NR_kill, LINUX_SYSCALL0(__NR_getpid), LINUX_SIGSTOP);
 			}
-			else if (bsd_signum == SIGURG || bsd_signum == SIGCHLD || bsd_signum == SIGIO || bsd_signum == SIGWINCH
-				|| bsd_signum == SIGINFO)
+			else if (bsd_signum == SIGURG || bsd_signum == SIGIO || bsd_signum == SIGWINCH || bsd_signum == SIGINFO)
 			{
-				// XNU ignores these by default (bsd/sys/signalvar.h, sigprop), where Linux ends the process for SIGIO
-				// and for SIGPWR, which SIGINFO becomes
+				// XNU ignores these by default (bsd/sys/signalvar.h, sigprop: SA_IGNORE). Below, Linux would end the
+				// process for SIGIO and for SIGPWR (which SIGINFO becomes), and its SIG_DFL would stay in place, so a
+				// handler set later never ran. (SIGCHLD, XNU's other one, never comes here: sigaction() gives it to
+				// Linux.)
 				kern_printf("sigexc: ignored by default\n");
 			}
 			else
