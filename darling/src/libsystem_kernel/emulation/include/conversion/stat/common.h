@@ -146,7 +146,6 @@ struct stat64;
 
 void stat_linux_to_bsd(const struct linux_stat* lstat, struct stat* stat);
 void stat_linux_to_bsd64(const struct linux_stat* lstat, struct stat64* stat);
-void statfs_linux_to_bsd(const struct linux_statfs64* lstat, struct bsd_statfs* stat);
 void statfs_linux_to_bsd64(const struct linux_statfs64* lstat, struct bsd_statfs64* stat);
 
 #endif // LINUX_STAT_COMMON_H
