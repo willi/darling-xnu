@@ -88,28 +88,35 @@ static long clone_dir_is_mount(const char* path)
 struct clone_walk
 {
 	struct vchroot_expand_args vc;
-	char rest[VCHROOT_PATH_MAX]; // what's left of the path
+	char rest[XNU_MAXPATHLEN]; // what's left of the path: namei() keeps it in MAXPATHLEN
+	char link[XNU_MAXPATHLEN];
 	char done[VCHROOT_PATH_MAX]; // the directories walked so far, relative to dfd
-	char link[VCHROOT_PATH_MAX];
 };
 
 // NAMEI_NOFOLLOW_ANY and NAMEI_RESOLVE_BENEATH, which vchroot_expand() doesn't know: a symbolic link anywhere on the path
-// (at its end too, when followed) is ELOOP; and the path may not leave dfd's directory: an absolute path, a ".." above it,
-// or a symbolic link to an absolute path is ENOTCAPABLE. The walk goes over the path a component at a time, looking each
-// one up without following it, and stops at the first one it can't look up: the lookup proper then answers. 0, or a
-// negative XNU errno.
+// (at its end too, when followed, or followed by a slash) is ELOOP; and the path may not leave dfd's directory: an
+// absolute path, a ".." above it, or a symbolic link to an absolute path is ENOTCAPABLE. The walk goes over the path a
+// component at a time, looking each one up without following it, and stops at the first one it can't look up: the
+// lookup proper then answers. 0, or a negative XNU errno. Only a call with one of the flags walks.
 static __attribute__((noinline)) long clone_walk(int dfd, const char* path, int follow, uint32_t flags)
 {
 	struct clone_walk w;
 	struct linux_stat st;
 	const int beneath = flags & XNU_CLONE_RESOLVE_BENEATH, noany = flags & XNU_CLONE_NOFOLLOW_ANY;
-	__SIZE_TYPE__ len, done_len, sep, k;
+	__SIZE_TYPE__ len, done_len, sep, k, rest_len;
 	char *p, *end;
 	int depth = 0, links = 0, last;
 	long ret;
 
-	if (!beneath && !noany)
-		return 0;
+	// namei_setup_at_dir(): a relative path's directory is checked before any of its components
+	if (path[0] != '/' && dfd != LINUX_AT_FDCWD)
+	{
+		ret = linux_path_stat(dfd, "", LINUX_AT_EMPTY_PATH, &st);
+		if (ret < 0)
+			return ret;
+		if ((st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR)
+			return -ENOTDIR;
+	}
 	if (beneath && path[0] == '/')
 		return -XNU_ENOTCAPABLE;
 
@@ -168,27 +175,28 @@ static __attribute__((noinline)) long clone_walk(int dfd, const char* path, int 
 		if (vchroot_expand(&w.vc) < 0 || linux_path_stat(LINUX_AT_FDCWD, w.vc.path, LINUX_AT_SYMLINK_NOFOLLOW, &st) < 0)
 			return 0;
 
-		if ((st.st_mode & LINUX_S_IFMT) == LINUX_S_IFLNK && (!last || follow))
+		// a link is followed when it isn't the last component, when the lookup follows, and before a slash
+		if ((st.st_mode & LINUX_S_IFMT) == LINUX_S_IFLNK && (!last || follow || k > 0))
 		{
 			if (noany || ++links > XNU_MAXSYMLINKS)
 				return -ELOOP;
 #ifdef __NR_readlink
-			ret = LINUX_SYSCALL(__NR_readlink, w.vc.path, w.link, sizeof(w.link) - 1);
+			ret = LINUX_SYSCALL(__NR_readlink, w.vc.path, w.link, sizeof(w.link));
 #else
-			ret = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, w.vc.path, w.link, sizeof(w.link) - 1);
+			ret = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, w.vc.path, w.link, sizeof(w.link));
 #endif
 			if (ret < 0)
 				return 0;
-			w.link[ret] = '\0';
-			// a symbolic link that restarts at the root
-			if (w.link[0] == '/')
-				return -XNU_ENOTCAPABLE;
-			// the link's text, then the rest of the path, from the link's directory
-			if (ret + 1 + strlen(end) >= sizeof(w.rest))
+			// lookup_handle_symlink(): the link's text and the rest of the path within MAXPATHLEN
+			rest_len = strlen(end);
+			if (ret + rest_len + 1 > sizeof(w.rest))
 				return -ENAMETOOLONG;
-			memmove(w.rest + ret + 1, end, strlen(end) + 1);
+			// a symbolic link that restarts at the root
+			if (ret > 0 && w.link[0] == '/')
+				return -XNU_ENOTCAPABLE;
+			// the link's text, then the rest of the path (from the slash after the link), from the link's directory
+			memmove(w.rest + ret, end, rest_len + 1);
 			memcpy(w.rest, w.link, ret);
-			w.rest[ret] = '/';
 			p = w.rest;
 			continue;
 		}
@@ -228,9 +236,12 @@ static long clone_to(int src_dfd, const char* src_path, int src_flags, const cha
 		return -EFAULT;
 	if (strlen(dst) >= XNU_MAXPATHLEN)
 		return -ENAMETOOLONG;
-	ret = clone_walk(atfd(dst_fd), dst, !(flags & XNU_CLONE_NOFOLLOW), flags);
-	if (ret < 0)
-		return ret;
+	if (flags & (XNU_CLONE_NOFOLLOW_ANY | XNU_CLONE_RESOLVE_BENEATH))
+	{
+		ret = clone_walk(atfd(dst_fd), dst, !(flags & XNU_CLONE_NOFOLLOW), flags);
+		if (ret < 0)
+			return ret;
+	}
 	vc.flags = (flags & XNU_CLONE_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
 	vc.dfd = atfd(dst_fd);
 	strcpy(vc.path, dst);
@@ -287,9 +298,12 @@ long sys_clonefileat(int src_fd, const char* src_path, int dest_fd, const char* 
 	if (strlen(src_path) >= XNU_MAXPATHLEN)
 		return -ENAMETOOLONG;
 
-	ret = clone_walk(atfd(src_fd), src_path, !nofollow, flags);
-	if (ret < 0)
-		return ret;
+	if (flags & (XNU_CLONE_NOFOLLOW_ANY | XNU_CLONE_RESOLVE_BENEATH))
+	{
+		ret = clone_walk(atfd(src_fd), src_path, !nofollow, flags);
+		if (ret < 0)
+			return ret;
+	}
 	vc.flags = nofollow ? 0 : VCHROOT_FOLLOW;
 	vc.dfd = atfd(src_fd);
 	strcpy(vc.path, src_path);
