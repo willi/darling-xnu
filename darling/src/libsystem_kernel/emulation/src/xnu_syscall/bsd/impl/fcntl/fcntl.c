@@ -13,6 +13,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 
 #define XNU_F_GETPROTECTIONCLASS 63
 #define XNU_F_SETPROTECTIONCLASS 64
@@ -257,6 +258,8 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 			kqueue_dup(fd, ret);
 			if (ROUTE_SOCKET_ACTIVE())
 				route_socket_dup(fd, ret);
+			if (NOSIGPIPE_ACTIVE())
+				socket_nosigpipe_dup(fd, ret);
 			break;
 	}
 

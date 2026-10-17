@@ -8,6 +8,7 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 
 __attribute__((weak))
 __attribute__((visibility("default")))
@@ -42,6 +43,9 @@ long sys_close_nocancel(int fd)
 	// before the number can be reused for another routing socket
 	if (ROUTE_SOCKET_ACTIVE())
 		route_socket_close(fd);
+	// and before its socket is gone: forget what was kept for it
+	if (NOSIGPIPE_ACTIVE())
+		socket_nosigpipe_close(fd);
 
 	ret = LINUX_SYSCALL1(__NR_close, fd);
 	if (ret < 0)

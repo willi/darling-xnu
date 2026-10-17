@@ -20,6 +20,7 @@
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 
 #include <darlingserver/rpc.h>
 
@@ -69,6 +70,7 @@ long sys_fork_special_ports_locked(void)
 		// (whose read() or write() takes them) may run as soon as the checkin below returns
 		route_atfork_child();
 		socket_errors_atfork_child();
+		socket_nosigpipe_atfork_child();
 #endif
 
 		// the old RPC FD will be closed in `guard_table_postfork_child`;

@@ -11,6 +11,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/time/gettimeofday.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
 
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
@@ -58,6 +59,11 @@ long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 
 	if (level == BSD_SOL_SOCKET && optname == BSD_SO_NREAD)
 		return so_nread(fd, optval, optlen);
+	if (level == BSD_SOL_SOCKET && optname == BSD_SO_NOSIGNAL) {
+		int on;
+		ret = socket_nosigpipe_get(fd, &on);
+		return ret < 0 ? ret : int_option(on, optval, optlen);
+	}
 
 	linux_level = level;
 	linux_optname = optname;

@@ -8,6 +8,7 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 
 extern void kqueue_dup(int oldfd, int newfd);
 
@@ -23,6 +24,8 @@ long sys_dup2(int fd_from, int fd_to)
 	// a routing socket fd_to names stops being one, as when it's closed
 	if (ROUTE_SOCKET_ACTIVE() && fd_from != fd_to)
 		route_socket_close(fd_to);
+	if (NOSIGPIPE_ACTIVE() && fd_from != fd_to)
+		socket_nosigpipe_close(fd_to);
 
 	#if defined(__NR_dup2)
 		ret = LINUX_SYSCALL2(__NR_dup2, fd_from, fd_to);
@@ -40,6 +43,8 @@ long sys_dup2(int fd_from, int fd_to)
 		kqueue_dup(fd_from, fd_to);
 		if (ROUTE_SOCKET_ACTIVE())
 			route_socket_dup(fd_from, fd_to);
+		if (NOSIGPIPE_ACTIVE())
+			socket_nosigpipe_dup(fd_from, fd_to);
 	}
 
 	return ret;

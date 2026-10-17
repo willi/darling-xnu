@@ -11,6 +11,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/time/gettimeofday.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
 
 #define LINGER_TICKS_PER_SEC	100 // Is this the right number of ticks per sec?
 
@@ -22,6 +23,13 @@ long sys_setsockopt(int fd, int level, int optname, const void* optval, int optl
 
 	if (ROUTE_SOCKET_ACTIVE() && route_socket_sockopt(fd, 1, level, optname, (void*) optval, &optlen, &route_ret))
 		return route_ret;
+
+	// XNU's SOF_NOSIGPIPE (sooptcopyin() of an int)
+	if (level == BSD_SOL_SOCKET && optname == BSD_SO_NOSIGNAL) {
+		if (optval == NULL || optlen < (int) sizeof(int))
+			return -EINVAL;
+		return socket_nosigpipe_set(fd, *(const int*) optval != 0);
+	}
 
 	linux_level = level;
 	linux_optname = optname;
