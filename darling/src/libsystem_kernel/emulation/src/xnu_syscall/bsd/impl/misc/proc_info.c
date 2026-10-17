@@ -129,6 +129,7 @@ static bool parse_smaps_firstline(
 );
 static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
+static void pidinfo_names(int32_t pid, const char* linux_comm, struct executable_names* names);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
@@ -291,7 +292,13 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
 	info->pbi_start_tvsec = btime + starttime_secs;
 	info->pbi_start_tvusec = starttime_usecs;
 
-	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
+	// proc_pidbsdinfo(): MAXCOMLEN bytes of p_comm and 2 * MAXCOMLEN of p_name, each with its last byte a NUL
+	struct executable_names names = { 0 };
+	pidinfo_names(pid, shortinfo.pbsi_comm, &names);
+	memcpy(info->pbi_comm, names.p_comm, MAXCOMLEN);
+	info->pbi_comm[MAXCOMLEN - 1] = '\0';
+	memcpy(info->pbi_name, names.p_name, 2 * MAXCOMLEN);
+	info->pbi_name[2 * MAXCOMLEN - 1] = '\0';
 
 	return sizeof(struct proc_bsdinfo);
 reterr:
@@ -327,6 +334,17 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
 	return sizeof(struct proc_threadinfo);
 }
 
+// A process's p_name and p_comm (executable_names()); Linux's comm stands in for a process that isn't Darling's
+static void pidinfo_names(int32_t pid, const char* linux_comm, struct executable_names* names)
+{
+	if (executable_names(pid, names) == 0)
+		return;
+	strncpy(names->p_name, linux_comm, sizeof(names->p_name) - 1);
+	names->p_name[sizeof(names->p_name) - 1] = '\0';
+	strncpy(names->p_comm, linux_comm, sizeof(names->p_comm) - 1);
+	names->p_comm[sizeof(names->p_comm) - 1] = '\0';
+}
+
 static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
 {
 	char path[64], stat[1024];
@@ -352,9 +370,15 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
 
 #define READELEM() elem = next_stat_elem(&statptr); if (!elem) goto reterr
 
-	// comm
+	// comm: Linux's is mldr's, or the main thread's name. XNU's proc_pidbsdshortinfo() copies MAXCOMLEN bytes of p_comm
+	// and makes the last a NUL.
 	READELEM();
-	strncpy(info->pbsi_comm, elem, sizeof(info->pbsi_comm));
+	{
+		struct executable_names names = { 0 };
+		pidinfo_names(pid, elem, &names);
+		memcpy(info->pbsi_comm, names.p_comm, MAXCOMLEN);
+		info->pbsi_comm[MAXCOMLEN - 1] = '\0';
+	}
 
 	// process state
 	READELEM();

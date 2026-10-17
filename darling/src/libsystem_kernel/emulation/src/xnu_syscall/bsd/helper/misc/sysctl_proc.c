@@ -13,6 +13,7 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/dirent/getdirentries.h>
 #include <darling/emulation/conversion/fcntl/open.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
 
 #include <darlingserver/rpc.h>
 
@@ -150,15 +151,21 @@ const char* next_stat_elem(char** buf)
 		return NULL;
 	else if (*start == '(')
 	{
-		char* end;
+		// comm, which may hold spaces and parentheses itself (a thread's name is any 15 bytes): it ends at the line's
+		// last ')'
+		char* end = NULL;
+		char* p;
 
 		start++;
-		end = start;
-
-		while (*end != ')' && *end)
-			end++;
+		for (p = start; *p; p++)
+		{
+			if (*p == ')')
+				end = p;
+		}
+		if (!end)
+			return NULL;
 		*end = '\0';
-		*buf = end+2;
+		*buf = end[1] ? end + 2 : end + 1;
 	}
 	else
 	{
@@ -213,9 +220,15 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 
 #define READELEM() elem = next_stat_elem(&statptr); if (!elem) goto retnull
 
-	// comm
+	// comm: Linux's is mldr's, or the main thread's name. XNU's fill_user64_externproc() copies MAXCOMLEN bytes of p_comm
+	// (the executable's name), and Linux's stands in for a process that isn't Darling's.
 	READELEM();
-	strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
+	{
+		struct executable_names names = { 0 };
+		if (executable_names(kinfo->kinfo.kp_proc.p_pid, &names) < 0)
+			strncpy(names.p_comm, elem, sizeof(names.p_comm) - 1);
+		memcpy(kinfo->kinfo.kp_proc.p_comm, names.p_comm, MAXCOMLEN);
+	}
 
 	// process state
 	READELEM();

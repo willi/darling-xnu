@@ -10,6 +10,42 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darlingserver/rpc.h>
 
+extern void* memcpy(void* dst, const void* src, size_t n);
+
+long executable_names(int pid, struct executable_names* names)
+{
+	char path[4096];
+	uint64_t full_length;
+	size_t len, start, n;
+	int ret;
+
+	ret = dserver_rpc_get_executable_path(pid, path, sizeof(path), &full_length);
+	if (ret < 0)
+		return -LINUX_EIO;
+	if (ret > 0)
+		return -ret;
+	if (full_length >= sizeof(path))
+		return -LINUX_ENAMETOOLONG;
+
+	len = full_length;
+	while (len > 1 && path[len - 1] == '/')
+		len--;
+	start = len;
+	while (start > 0 && path[start - 1] != '/')
+		start--;
+	len -= start;
+	if (len == 0)
+		return -LINUX_ESRCH; // nothing recorded
+
+	n = len < sizeof(names->p_name) - 1 ? len : sizeof(names->p_name) - 1;
+	memcpy(names->p_name, path + start, n);
+	names->p_name[n] = '\0';
+	n = len < sizeof(names->p_comm) - 1 ? len : sizeof(names->p_comm) - 1;
+	memcpy(names->p_comm, path + start, n);
+	names->p_comm[n] = '\0';
+	return 0;
+}
+
 int executable_open(int pid)
 {
 	char path[4096];
