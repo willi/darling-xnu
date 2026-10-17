@@ -22,6 +22,8 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/ifinfo.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/rtnetlink.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/network/sendto.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/network/socketpair.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
 
 extern void* memset(void* destination, int value, __SIZE_TYPE__ length);
@@ -30,7 +32,6 @@ extern void* memcpy(void* destination, const void* source, __SIZE_TYPE__ n);
 #define LINUX_AF_UNIX 1
 #define LINUX_SOCK_CLOEXEC 02000000
 #define LINUX_F_SETFD 2
-#define LINUX_SYS_SOCKETPAIR 8
 
 // XNU's private RTM_GET that only the sender sees (net/route.h, PRIVATE)
 #ifndef RTM_GET_SILENT
