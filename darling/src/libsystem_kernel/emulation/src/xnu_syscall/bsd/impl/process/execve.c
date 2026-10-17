@@ -24,6 +24,8 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/write.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
+#include <darling/emulation/conversion/common_at.h>
 
 #include <darlingserver/rpc.h>
 
@@ -37,6 +39,19 @@ extern void _xtrace_execve_inject(const char*** envp_ptr);
 static inline bool istext(char c)
 {
 	return c >= 0x20 && c < 0x7F;
+}
+
+// XNU's exec_check_permissions() (xnu-12377.121.6 bsd/kern/kern_exec.c), before it reads the header, for the image
+// and a script's interpreter: a regular file, with an execute bit. Linux checks mldr, not what mldr loads.
+static long exec_check_permissions(const char* linux_path)
+{
+	struct linux_stat st;
+	long ret = linux_path_stat(LINUX_AT_FDCWD, linux_path, 0, &st);
+	if (ret < 0)
+		return ret;
+	if ((st.st_mode & 0170000) != 0100000 || (st.st_mode & 0111) == 0)
+		return -EACCES;
+	return 0;
 }
 
 long sys_execve(const char* fname, const char** argvp, const char** envp)
@@ -66,6 +81,10 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 	__simple_kprintf("execve expand %s -> %s, ret %d", fname, vc.path, ret);
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
+
+	ret = exec_check_permissions(vc.path);
+	if (ret < 0)
+		return ret;
 
 	char shebang[256];
 	int fd = sys_open(fname, BSD_O_RDONLY, 0);
@@ -155,6 +174,9 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 
 			ret = vchroot_expand(&vc);
 			if (ret < 0)
+				return errno_linux_to_bsd(ret);
+			ret = exec_check_permissions(vc.path);
+			if (ret < 0)
 				return ret;
 
 			path_to_exec = mldr_path;
@@ -200,7 +222,7 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 		// count original env vars
 		while (envp[len++]);
 
-		const int new_env_count = spawn_fd >= 0 ? 3 : 2;
+		const int new_env_count = 3;
 
 		// allocate a new envp and env0, env1
 		modenvp = (const char**)__builtin_alloca(sizeof(void*) * (len + new_env_count));
@@ -211,8 +233,8 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 		strcat(buf, server_socket_path);
 		modenvp[0] = buf;
 		modenvp[1] = mldr_lifetime_pipe_env;
-		if (spawn_fd >= 0)
-			modenvp[2] = mldr_spawn_pipe_env;
+		// always set, so one the program inherited never counts
+		modenvp[2] = mldr_spawn_pipe_env;
 
 		// append original env vars
 		for (int i = new_env_count; i < len + new_env_count; i++)
@@ -254,7 +276,7 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 	// let xtrace inject itself into the execve, if necessary
 	_xtrace_execve_inject(&envp);
 
-	// mldr takes posix_spawn()'s pipe across the exec
+	// mldr takes posix_spawn()'s pipe across the exec (execve.h)
 	bool pass_spawn_fd = spawn_fd >= 0 && (is_script || is_macho);
 	if (pass_spawn_fd)
 		LINUX_SYSCALL(__NR_fcntl, spawn_fd, LINUX_F_SETFD, 0);

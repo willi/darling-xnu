@@ -31,7 +31,7 @@ struct proc_names
 
 // Fills `names` for pid: from its executable, or from `linux_comm` (Linux's comm, from /proc/<pid>/stat) for a process
 // darlingserver has no executable for (ESRCH: one that exec'd a Linux program, or one that has exited). 0, or a negative
-// Linux errno when darlingserver can't answer (EIO, ENAMETOOLONG).
+// Linux errno when darlingserver can't answer (EIO, ENAMETOOLONG), with Linux's comm in `names` all the same.
 long executable_proc_names(int pid, const char* linux_comm, struct proc_names* names);
 
 #endif // _DARLING_EMULATION_EXECUTABLE_H_

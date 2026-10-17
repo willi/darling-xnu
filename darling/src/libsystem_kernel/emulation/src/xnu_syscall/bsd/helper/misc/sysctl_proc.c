@@ -263,10 +263,8 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 	if (kinfo->kinfo.kp_eproc.e_tdev != 0)
 		kinfo->kinfo.kp_proc.p_flag |= P_CONTROLT;
 
-	skip_stat_elems(&statptr, 10); // tpgid to cstime
-
-	READELEM();
-	kinfo->kinfo.kp_proc.p_priority = __simple_atoi(elem, NULL);
+	// tpgid to priority: XNU's p_priority stays 0, as nothing sets the proc's (fill_user64_externproc(), kern_sysctl.c)
+	skip_stat_elems(&statptr, 11);
 
 	READELEM();
 	kinfo->kinfo.kp_proc.p_nice = elem[0] == '-' ? -__simple_atoi(elem + 1, NULL) : __simple_atoi(elem, NULL);
@@ -332,13 +330,10 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 	{
 		struct proc_names names;
 		long err = executable_proc_names(kinfo->kinfo.kp_proc.p_pid, linux_comm, &names);
-		if (err < 0)
+		if (err < 0 && !names_failed)
 		{
-			if (!names_failed)
-				__simple_kprintf("sysctl KERN_PROC: no name for pid %d from darlingserver: %ld", kinfo->kinfo.kp_proc.p_pid, err);
+			__simple_kprintf("sysctl KERN_PROC: no name for pid %d from darlingserver: %ld", kinfo->kinfo.kp_proc.p_pid, err);
 			names_failed = 1;
-			strncpy(names.p_comm, linux_comm, sizeof(names.p_comm) - 1);
-			names.p_comm[sizeof(names.p_comm) - 1] = '\0';
 		}
 		memcpy(kinfo->kinfo.kp_proc.p_comm, names.p_comm, MAXCOMLEN);
 	}

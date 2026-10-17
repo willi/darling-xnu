@@ -128,10 +128,10 @@ static bool parse_smaps_firstline(
 	char* vip_path
 );
 static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
-static long _proc_pidinfo_shortbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
-static long fill_shortbsdinfo(int32_t pid, uint64_t arg, struct proc_bsdshortinfo* info, struct proc_names* names);
+static long _proc_pidinfo_shortbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
+static long fill_shortbsdinfo(int32_t pid, bool find_zombie, struct proc_bsdshortinfo* info, struct proc_names* names);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
-static long _proc_pidinfo_tbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_tbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
@@ -142,6 +142,10 @@ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize
 
 long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
 {
+	// proc_pidinfo() (xnu-12377.121.6 bsd/kern/proc_info.c) finds a zombie for these flavors when arg is nonzero, and
+	// otherwise not: proc_find() doesn't (bsd/kern/kern_proc.c)
+	bool find_zombie = arg != 0;
+
 	switch (flavor)
 	{
 		// arg is a memory location we want to know about
@@ -154,7 +158,7 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		}
 		case PROC_PIDT_SHORTBSDINFO:
 		{
-			return _proc_pidinfo_shortbsdinfo(pid, arg, buffer, bufsize);
+			return _proc_pidinfo_shortbsdinfo(pid, find_zombie, buffer, bufsize);
 		}
 		case PROC_PIDUNIQIDENTIFIERINFO:
 		{
@@ -162,7 +166,7 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		}
 		case PROC_PIDTBSDINFO:
 		{
-			return _proc_pidinfo_tbsdinfo(pid, arg, buffer, bufsize);
+			return _proc_pidinfo_tbsdinfo(pid, find_zombie, buffer, bufsize);
 		}
 		case PROC_PIDTHREADINFO:
 		{
@@ -232,8 +236,7 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 // glibc bits/confname.h
 #define _SC_CLK_TCK 2
 
-// arg: as in XNU's proc_pidinfo(), nonzero finds a zombie too
-static long _proc_pidinfo_tbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
+static long _proc_pidinfo_tbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize)
 {
 	struct proc_bsdinfo* info = (struct proc_bsdinfo*) buffer;
 
@@ -242,7 +245,7 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, uint64_t arg, void* buffer, int3
 
 	struct proc_bsdshortinfo shortinfo;
 	struct proc_names names;
-	long err = fill_shortbsdinfo(pid, arg, &shortinfo, &names);
+	long err = fill_shortbsdinfo(pid, find_zombie, &shortinfo, &names);
 
 	if (err < 0)
 		return err;
@@ -334,7 +337,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
 	return sizeof(struct proc_threadinfo);
 }
 
-static long _proc_pidinfo_shortbsdinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
+static long _proc_pidinfo_shortbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize)
 {
 	struct proc_names names;
 	long err;
@@ -342,14 +345,14 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, uint64_t arg, void* buffer, 
 	if (bufsize < sizeof(struct proc_bsdshortinfo))
 		return -ENOSPC;
 	memset(buffer, 0, bufsize);
-	if ((err = fill_shortbsdinfo(pid, arg, (struct proc_bsdshortinfo*) buffer, &names)) < 0)
+	if ((err = fill_shortbsdinfo(pid, find_zombie, (struct proc_bsdshortinfo*) buffer, &names)) < 0)
 		return err;
 	return sizeof(struct proc_bsdshortinfo);
 }
 
 // PROC_PIDT_SHORTBSDINFO's fields into info, and the names it took pbsi_comm from into names (PROC_PIDTBSDINFO's other
-// two): 0, or a negative errno. arg: nonzero finds a zombie too.
-static long fill_shortbsdinfo(int32_t pid, uint64_t arg, struct proc_bsdshortinfo* info, struct proc_names* names)
+// two): 0, or a negative errno. A zombie is ESRCH unless find_zombie.
+static long fill_shortbsdinfo(int32_t pid, bool find_zombie, struct proc_bsdshortinfo* info, struct proc_names* names)
 {
 	char path[64], stat[1024];
 	char *statptr;
@@ -391,9 +394,9 @@ static long fill_shortbsdinfo(int32_t pid, uint64_t arg, struct proc_bsdshortinf
 			info->pbsi_status = SSTOP;
 			break;
 		case 'Z':
-			// proc_find() doesn't find a zombie (xnu-12377.121.6 bsd/kern/kern_proc.c), and proc_pidinfo() looks for one
-			// only when asked to (bsd/kern/proc_info.c)
-			if (!arg)
+			// only a process that has exited: Darling parks a main thread that calls pthread_exit() (dispatch_main())
+			// rather than let Linux mark the live leader 'Z' (__darling_thread_terminate(), mldr's elfcalls/threads.c)
+			if (!find_zombie)
 				return -ESRCH;
 			info->pbsi_status = SZOMB;
 			break;
@@ -752,7 +755,7 @@ static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize
 		return -ENOSPC;
 	
 	// PROC_PIDTASKALLINFO finds no zombie
-	long err = _proc_pidinfo_tbsdinfo(pid, 0, buffer + offsetof(struct proc_taskallinfo, pbsd), sizeof(struct proc_bsdinfo));
+	long err = _proc_pidinfo_tbsdinfo(pid, false, buffer + offsetof(struct proc_taskallinfo, pbsd), sizeof(struct proc_bsdinfo));
 	
 	if (err < 0)
 		return err;

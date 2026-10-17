@@ -43,28 +43,12 @@ static void set_names(struct proc_names* names, const char* name, size_t len)
 	names->p_comm[n] = '\0';
 }
 
-// The calling process's own names, which change only at exec, and an exec starts a fresh copy of this library. The
-// pid they're for is checked against the caller's: a fork's child has another. self_state: 0 empty, 1 being filled
-// (by the one thread that claimed it), 2 filled.
-static struct proc_names self_names;
-static int self_pid;
-static int self_state;
-
 long executable_proc_names(int pid, const char* linux_comm, struct proc_names* names)
 {
 	char path[4096];
-	size_t len, start;
-	long ret;
-	int is_self = pid == LINUX_SYSCALL0(__NR_getpid);
+	size_t len = 0, start;
+	long ret = executable_path(pid, path, sizeof(path));
 
-	if (is_self && __atomic_load_n(&self_state, __ATOMIC_ACQUIRE) == 2 && self_pid == pid)
-	{
-		*names = self_names;
-		return 0;
-	}
-
-	ret = executable_path(pid, path, sizeof(path));
-	len = 0;
 	if (ret == 0)
 	{
 		len = __simple_strlen(path);
@@ -74,27 +58,16 @@ long executable_proc_names(int pid, const char* linux_comm, struct proc_names* n
 	start = len;
 	while (start > 0 && path[start - 1] != '/')
 		start--;
-
 	if (ret == 0 && len > start)
 	{
 		set_names(names, path + start, len - start);
-		int empty = 0;
-		if (is_self && __atomic_compare_exchange_n(&self_state, &empty, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-		{
-			self_names = *names;
-			self_pid = pid;
-			__atomic_store_n(&self_state, 2, __ATOMIC_RELEASE);
-		}
 		return 0;
 	}
 
-	// nothing recorded (ESRCH, or an empty path: a process that hasn't told darlingserver yet)
-	if (ret == 0 || ret == -LINUX_ESRCH)
-	{
-		set_names(names, linux_comm, __simple_strlen(linux_comm));
-		return 0;
-	}
-	return ret;
+	// Linux's comm: for a process darlingserver knows no executable for (ESRCH, or an empty path: one that hasn't told
+	// it yet), and in names on an error too
+	set_names(names, linux_comm, __simple_strlen(linux_comm));
+	return (ret == 0 || ret == -LINUX_ESRCH) ? 0 : ret;
 }
 
 int executable_open(int pid)
