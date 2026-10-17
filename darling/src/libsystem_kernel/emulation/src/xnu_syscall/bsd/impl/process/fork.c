@@ -19,6 +19,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 
 #include <darlingserver/rpc.h>
 
@@ -72,6 +73,7 @@ long sys_fork_special_ports_locked(void)
 		// we don't need to close it ourselves.
 		// that should also take care of closing descriptors for any other threads.
 		guard_table_postfork_child();
+		purgeable_atfork_child();
 
 		// create a new dserver RPC socket
 		__dserver_per_thread_socket_refresh();

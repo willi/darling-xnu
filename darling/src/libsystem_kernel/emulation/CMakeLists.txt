@@ -362,6 +362,7 @@ set(xnu_syscall_mach_sources
 
 	src/xnu_syscall/mach/impl/mach_time.c
 	src/xnu_syscall/mach/impl/mach_traps.c
+	src/xnu_syscall/mach/impl/purgeable.c
 )
 
 set(xnu_syscall_machdep_sources

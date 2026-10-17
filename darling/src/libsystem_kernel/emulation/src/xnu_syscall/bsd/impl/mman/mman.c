@@ -4,6 +4,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 
 static int prot_bsd_to_linux(int prot)
 {
@@ -51,6 +52,8 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
 
 	if ((unsigned long)ret > (unsigned long) -4096)
 		ret = (void*)(long) errno_linux_to_bsd((int) ret);
+	else if (flags & MAP_FIXED)
+		purgeable_forget((uintptr_t) start, len); // what was mapped there is gone
 
 	return ret;
 }
@@ -62,6 +65,8 @@ long sys_munmap(void* addr, unsigned long len)
 	ret = LINUX_SYSCALL2(__NR_munmap, addr, len);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
+	else
+		purgeable_forget((uintptr_t) addr, len);
 
 	return ret;
 }
