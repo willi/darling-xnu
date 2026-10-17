@@ -62,11 +62,6 @@
 #include <stdbool.h>
 #include "externs.h"
 
-#ifdef DARLING
-#include <darling/emulation/conversion/duct_errno.h>
-#include <darlingserver/rpc.h>
-#endif
-
 mach_port_t bootstrap_port = MACH_PORT_NULL;
 mach_port_t mach_task_self_ = MACH_PORT_NULL;
 #ifdef __i386__
@@ -88,9 +83,6 @@ int mach_init(const char** applep);
 int mach_init(void);
 #endif
 int _mach_fork_child(void);
-#ifdef DARLING
-int _mach_fork_parent(void);
-#endif
 
 #ifdef DARLING
 static void mach_init_doit(const char** applep);
@@ -142,22 +134,6 @@ _mach_fork_child(void)
 #endif
 	return 0;
 }
-
-#ifdef DARLING
-int _mach_fork_parent(void) {
-	int result;
-
-retry:
-	result = dserver_rpc_fork_wait_for_child();
-	if (result < 0) {
-		if (result == -LINUX_EINTR) {
-			goto retry;
-		}
-		__builtin_unreachable();
-	}
-	return 0;
-};
-#endif
 
 #if defined(__arm__) || defined(__arm64__)
 #if !defined(_COMM_PAGE_USER_PAGE_SHIFT_64) && defined(_COMM_PAGE_UNUSED0)
