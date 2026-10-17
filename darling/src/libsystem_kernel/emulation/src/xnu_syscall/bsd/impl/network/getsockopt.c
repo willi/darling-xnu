@@ -9,6 +9,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/time/gettimeofday.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 
 long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 {
@@ -50,6 +51,9 @@ long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 				int* err = (int*) optval;
 				if (err && *err)
 					*err = errno_linux_to_bsd(*err);
+				// an error EVFILT_SOCK took from Linux, held for this
+				if (err && SOCKET_ERRORS_HELD())
+					*err = socket_error_take(fd, *err);
 			}
 			else if (optname == BSD_SO_RCVTIMEO)
 			{

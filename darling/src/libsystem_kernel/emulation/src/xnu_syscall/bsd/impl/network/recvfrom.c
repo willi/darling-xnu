@@ -8,6 +8,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/network/socket.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
@@ -42,6 +43,10 @@ long sys_recvfrom_nocancel(int fd, void* buf, unsigned long len,
 		if ((*socklen = sockaddr_fixup_from_linux(fixed, from, *socklen)) < 0)
 			ret = *socklen;
 	}
+
+	// with no data, XNU returns the socket's pending error first (sostate.h)
+	if (ret <= 0 && SOCKET_ERRORS_HELD())
+		ret = socket_error_read(fd, ret, flags & BSD_MSG_PEEK);
 
 	return ret;
 }

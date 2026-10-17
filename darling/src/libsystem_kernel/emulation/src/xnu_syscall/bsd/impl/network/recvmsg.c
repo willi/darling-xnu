@@ -8,6 +8,7 @@
 #include <darling/emulation/conversion/network/getsockopt.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/network/getsockopt.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
@@ -118,6 +119,10 @@ long sys_recvmsg_nocancel(int socket, struct bsd_msghdr* msg, int flags)
 
 	if (lchdr != NULL)
 		free(lchdr);
+
+	// with no data, XNU returns the socket's pending error first (sostate.h)
+	if (ret <= 0 && SOCKET_ERRORS_HELD())
+		ret = socket_error_read(socket, ret, flags & BSD_MSG_PEEK);
 
 	// __simple_printf("Returning %d\n", ret);
 	return ret;

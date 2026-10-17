@@ -39,3 +39,7 @@ int _signal_knote_open_4libkqueue(int signum) {
 void _signal_knote_close_4libkqueue(int fd) {
 	signal_knote_close(fd);
 };
+
+int _socket_state_4libkqueue(int fd, unsigned int* state, int* error) {
+	return socket_state(fd, state, error);
+};

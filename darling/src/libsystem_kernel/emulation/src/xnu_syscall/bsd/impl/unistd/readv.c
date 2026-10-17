@@ -3,6 +3,7 @@
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
 long sys_readv(int fd, struct iovec* iovp, unsigned int len)
@@ -17,7 +18,11 @@ long sys_readv_nocancel(int fd, struct iovec* iovp, unsigned int len)
 
 	ret = LINUX_SYSCALL3(__NR_readv, fd, iovp, len);
 	if (ret < 0)
-		return errno_linux_to_bsd(ret);
+		ret = errno_linux_to_bsd(ret);
+
+	// on a socket with no data, XNU returns its pending error first (sostate.h)
+	if (ret <= 0 && SOCKET_ERRORS_HELD())
+		ret = socket_error_read(fd, ret, 0);
 
 	return ret;
 }
