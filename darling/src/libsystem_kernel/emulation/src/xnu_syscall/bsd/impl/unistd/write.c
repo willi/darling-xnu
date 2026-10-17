@@ -6,8 +6,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 #include <sys/uio.h>
 
@@ -37,7 +36,7 @@ long sys_write_nocancel(int fd, const void* mem, int len)
 		struct iovec iov = { (void*) mem, len };
 		long sent;
 		if (socket_nosigpipe_write(fd, &iov, 1, &sent))
-			return sent < 0 ? socket_send_done(fd, socket_error_send(fd, sent), 0, 0) : sent;
+			return sent < 0 ? socket_send_failed(fd, sent, 0, 0) : sent;
 	}
 
 	ret = LINUX_SYSCALL3(__NR_write, fd, mem, len);
@@ -45,7 +44,7 @@ long sys_write_nocancel(int fd, const void* mem, int len)
 		// Linux raised SIGPIPE itself for its own EPIPE; a socket error made EPIPE gets XNU's (sostate.h)
 		int linux_raised = ret == -LINUX_EPIPE;
 		ret = errno_linux_to_bsd(ret);
-		return socket_send_done(fd, socket_error_send(fd, ret), 0, linux_raised);
+		return socket_send_failed(fd, ret, 0, linux_raised);
 	}
 
 	return ret;

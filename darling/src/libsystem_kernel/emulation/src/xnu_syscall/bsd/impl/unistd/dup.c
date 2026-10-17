@@ -3,8 +3,8 @@
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/linux_premigration/ext/for-libkqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 __attribute__((weak))
 __attribute__((visibility("default")))
@@ -19,10 +19,7 @@ long sys_dup(int fd)
 		ret = errno_linux_to_bsd(ret);
 	else {
 		kqueue_dup(fd, ret);
-		if (ROUTE_SOCKET_ACTIVE())
-			route_socket_dup(fd, ret);
-		if (NOSIGPIPE_ACTIVE())
-			socket_nosigpipe_dup(fd, ret);
+		socket_tables_dup(fd, ret);
 	}
 
 	return ret;

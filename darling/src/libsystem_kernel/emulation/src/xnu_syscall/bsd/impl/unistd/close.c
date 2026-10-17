@@ -7,9 +7,8 @@
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/common/guarded/table.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/linux_premigration/ext/for-libkqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 __attribute__((weak))
 __attribute__((visibility("default")))
@@ -41,14 +40,7 @@ long sys_close_nocancel(int fd)
 		return 0;
 	}
 
-	// before the number can be reused for another routing socket
-	if (ROUTE_SOCKET_ACTIVE())
-		route_socket_close(fd);
-	// and before its socket is gone: forget what was kept for it
-	if (SOCKET_ENTRIES_USED())
-		socket_errors_close(fd);
-	if (NOSIGPIPE_ACTIVE())
-		socket_nosigpipe_close(fd);
+	socket_tables_close(fd);
 
 	ret = LINUX_SYSCALL1(__NR_close, fd);
 	if (ret < 0)

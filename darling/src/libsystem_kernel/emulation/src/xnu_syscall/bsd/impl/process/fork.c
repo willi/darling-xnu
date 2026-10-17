@@ -18,9 +18,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 #include <darlingserver/rpc.h>
 
@@ -66,11 +64,8 @@ long sys_fork_special_ports_locked(void)
 		// take: a signal meanwhile would write to it
 		signal_knotes_atfork_child();
 
-		// the tables the socket paths share: their locks may have been held by a parent thread, and a signal handler
-		// (whose read() or write() takes them) may run as soon as the checkin below returns
-		route_atfork_child();
-		socket_errors_atfork_child();
-		socket_nosigpipe_atfork_child();
+		// the socket tables' locks, before a signal handler can take them (socktables.h)
+		socket_tables_atfork_child();
 #endif
 
 		// the old RPC FD will be closed in `guard_table_postfork_child`;

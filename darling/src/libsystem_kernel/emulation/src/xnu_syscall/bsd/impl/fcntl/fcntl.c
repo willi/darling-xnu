@@ -12,8 +12,8 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/conversion/stat/common.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/linux_premigration/ext/for-libkqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 #define XNU_F_GETPROTECTIONCLASS 63
 #define XNU_F_SETPROTECTIONCLASS 64
@@ -45,8 +45,6 @@ int oflags_linux_to_bsd(int flags);
 
 extern int sprintf(char *str, const char *format, ...);
 long sys_readlink(const char* path, char* buf, unsigned long bsize);
-
-extern void kqueue_dup(int oldfd, int newfd);
 
 static short int flock_type_linux_to_bsd(short int linux) {
 	switch (linux) {
@@ -256,10 +254,7 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 		case F_DUPFD:
 		case F_DUPFD_CLOEXEC:
 			kqueue_dup(fd, ret);
-			if (ROUTE_SOCKET_ACTIVE())
-				route_socket_dup(fd, ret);
-			if (NOSIGPIPE_ACTIVE())
-				socket_nosigpipe_dup(fd, ret);
+			socket_tables_dup(fd, ret);
 			break;
 	}
 

@@ -10,8 +10,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/duct.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 
@@ -56,8 +55,8 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 	ret = local_dgram_send_result(local_dgram, ret);
 	if (ret < 0) {
 		ret = errno_linux_to_bsd(ret);
-		// XNU's error, and its SIGPIPE: Linux raised none (sostate.h, nosigpipe.h)
-		ret = socket_send_done(fd, socket_error_send(fd, ret), flags & BSD_MSG_NOSIGNAL, 0);
+		// XNU's error, and its SIGPIPE: Linux raised none (socktables.h)
+		ret = socket_send_failed(fd, ret, flags & BSD_MSG_NOSIGNAL, 0);
 	}
 
 	return ret;

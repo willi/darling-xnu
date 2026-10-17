@@ -7,28 +7,22 @@
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/common/guarded/table.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
-#include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
-
-extern void kqueue_dup(int oldfd, int newfd);
+#include <darling/emulation/linux_premigration/ext/for-libkqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 
 long sys_dup2(int fd_from, int fd_to)
 {
 	int ret;
+	unsigned long long replacing = 0;
 
 	if (guard_table_check(fd_to, guard_flag_prevent_close)) {
 		__simple_kprintf("*** Someone tried to close a guarded FD (%d) via dup2! ***", fd_to);
 		__simple_abort();
 	}
 
-	// a routing socket fd_to names stops being one, as when it's closed
-	if (ROUTE_SOCKET_ACTIVE() && fd_from != fd_to)
-		route_socket_close(fd_to);
-	if (SOCKET_ENTRIES_USED() && fd_from != fd_to)
-		socket_errors_close(fd_to);
-	if (NOSIGPIPE_ACTIVE() && fd_from != fd_to)
-		socket_nosigpipe_close(fd_to);
+	// what fd_to was, if this replaces it
+	if (fd_from != fd_to)
+		replacing = socket_tables_replacing(fd_to);
 
 	#if defined(__NR_dup2)
 		ret = LINUX_SYSCALL2(__NR_dup2, fd_from, fd_to);
@@ -43,11 +37,13 @@ long sys_dup2(int fd_from, int fd_to)
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 	else {
+		// fd_to was closed, as by close(): its knotes go (XNU's dup2() closes it with knote_fdclose())
+		if (fd_from != fd_to) {
+			socket_tables_replaced(fd_to, replacing);
+			kqueue_closed_fd(fd_to);
+		}
 		kqueue_dup(fd_from, fd_to);
-		if (ROUTE_SOCKET_ACTIVE())
-			route_socket_dup(fd_from, fd_to);
-		if (NOSIGPIPE_ACTIVE())
-			socket_nosigpipe_dup(fd_from, fd_to);
+		socket_tables_dup(fd_from, fd_to);
 	}
 
 	return ret;
