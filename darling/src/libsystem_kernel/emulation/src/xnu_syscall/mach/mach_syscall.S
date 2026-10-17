@@ -11,6 +11,9 @@ __darling_mach_syscall:
 Lpositive:
 Lentry_hook:
 	.space 13, 0x90
+	# the table has 128 entries, as XNU's (MACH_TRAP_TABLE_COUNT)
+	cmpl	$128, %eax
+	jae		.no_sys
 	movq    ___mach_syscall_table@GOTPCREL(%rip), %r10
 	movq	(%r10,%rax,8), %r10
 	test	%r10, %r10
@@ -58,8 +61,11 @@ Lentry_hook:
 2:
 	movl	L___mach_syscall_table$non_lazy_ptr-1b(%ecx), %ecx
 	andl	$0xffff, %eax // Because there is some extra stuff in upper bytes we don't need
-	movl	(%ecx,%eax,4), %eax
-	test	%eax, %eax
+	// the table has 128 entries, as XNU's (MACH_TRAP_TABLE_COUNT); %eax keeps the number for .no_sys
+	cmpl	$128, %eax
+	jae		.no_sys
+	movl	(%ecx,%eax,4), %edx
+	test	%edx, %edx
 	jz		.no_sys
 	// Copy arguments
 	copy_arg(0)
@@ -78,14 +84,14 @@ Lentry_hook:
 	copy_arg(52)
 
 	subl	$56, %esp
-	call	*%eax
+	call	*%edx
 	addl	$56, %esp
 .std_ret:
 Lexit_hook:
 	.space 7, 0x90
 	ret
 .no_sys:
-	pushl	%ecx
+	pushl	%eax
 	call	___unknown_mach_syscall
 	addl	$4, %esp
 	jmp .std_ret
