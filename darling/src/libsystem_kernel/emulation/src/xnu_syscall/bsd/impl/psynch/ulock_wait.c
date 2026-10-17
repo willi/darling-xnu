@@ -8,7 +8,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
-#include <libsimple/lock.h>
+#include <darling/emulation/common/sigsafe_lock.h>
 
 struct timespec
 {
@@ -32,24 +32,15 @@ static libsimple_lock_t ulock_waiters_lock = LIBSIMPLE_LOCK_INITIALIZER;
 static struct ulock_waiters ulock_waiters[ULOCK_WAITERS_MAX];
 static unsigned int ulock_waiters_used;
 
-#define LINUX_SIG_BLOCK 0
-#define LINUX_SIG_SETMASK 2
-
-// A signal handler that waits on a lock would deadlock on the table lock its thread holds, so signals stay blocked
-// while it's held.
+// A signal handler that waits on a lock would deadlock on the table lock its thread holds: sigsafe_lock.h
 static uint64_t ulock_waiters_lock_lock(void)
 {
-	uint64_t all = ~0ull, old;
-
-	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_BLOCK, &all, &old, sizeof(all));
-	libsimple_lock_lock(&ulock_waiters_lock);
-	return old;
+	return sigsafe_lock(&ulock_waiters_lock);
 }
 
 static void ulock_waiters_lock_unlock(uint64_t old)
 {
-	libsimple_lock_unlock(&ulock_waiters_lock);
-	LINUX_SYSCALL(__NR_rt_sigprocmask, LINUX_SIG_SETMASK, &old, NULL, sizeof(old));
+	sigsafe_unlock(&ulock_waiters_lock, old);
 }
 
 // Counts a waiter on `addr`; false if the table is full, and then it isn't counted.
