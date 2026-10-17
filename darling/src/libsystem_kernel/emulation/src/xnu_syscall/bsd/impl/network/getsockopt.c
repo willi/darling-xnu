@@ -1,6 +1,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/network/getsockopt.h>
 
 #include <stddef.h>
+#include <sys/errno.h>
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
@@ -10,6 +11,42 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/time/gettimeofday.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
+
+extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
+
+#define LINUX_FIONREAD 0x541B
+#define LINUX_EINVAL 22
+
+// XNU's sooptcopyout() of an int option: as much of it as fits
+static long int_option(int value, void* optval, int* optlen)
+{
+	int n = *optlen < (int) sizeof(value) ? *optlen : (int) sizeof(value);
+
+	if (n < 0)
+		return -EINVAL;
+	memcpy(optval, &value, n);
+	*optlen = n;
+	return 0;
+}
+
+// SO_NREAD (XNU's sogetoptlock()): the bytes a stream socket has to read, or the first datagram's; Linux's FIONREAD
+// (SIOCINQ) is the same, but refuses a listening TCP socket, which has none
+static long so_nread(int fd, void* optval, int* optlen)
+{
+	unsigned long long cookie;
+	int n = 0;
+	long ret = linux_socket_cookie(fd, &cookie);
+
+	if (ret < 0)
+		return errno_linux_to_bsd(ret);
+	ret = LINUX_SYSCALL(__NR_ioctl, fd, LINUX_FIONREAD, &n);
+	if (ret == -LINUX_EINVAL)
+		n = 0;
+	else if (ret < 0)
+		return errno_linux_to_bsd(ret);
+	return int_option(n, optval, optlen);
+}
 
 long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 {
@@ -18,6 +55,9 @@ long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 
 	if (ROUTE_SOCKET_ACTIVE() && route_socket_sockopt(fd, 0, level, optname, optval, optlen, &route_ret))
 		return route_ret;
+
+	if (level == BSD_SOL_SOCKET && optname == BSD_SO_NREAD)
+		return so_nread(fd, optval, optlen);
 
 	linux_level = level;
 	linux_optname = optname;
