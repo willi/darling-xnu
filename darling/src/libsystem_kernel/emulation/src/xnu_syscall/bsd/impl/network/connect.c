@@ -15,7 +15,7 @@ extern __SIZE_TYPE__ strlen(const char* src);
 extern char* strcpy(char* dest, const char* src);
 extern char *strncpy(char *dest, const char *src, __SIZE_TYPE__ n);
 
-// libkqueue's, when it's there (sostate.h)
+// libkqueue's, when it's there (for-libkqueue.h)
 __attribute__((weak))
 __attribute__((visibility("default")))
 void kqueue_socket_changed(int fd) {}
@@ -55,7 +55,7 @@ long sys_connect_nocancel(int fd, const void* name, int socklen)
 
 	// connected, or failed; a connect still in progress changes nothing yet
 	if (ret != -EINPROGRESS && ret != -EALREADY)
-		kqueue_socket_changed(fd);
+		SOCKET_CHANGED(fd);
 
 	return ret;
 }

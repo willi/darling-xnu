@@ -20,8 +20,11 @@ long sys_shutdown(int fd, int how)
 
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
-	else
+	else if (socket_watchers != 0) {
+		// Linux reports a shutdown of only sending no way: a watched socket remembers it, and its knotes look again
+		socket_shutdown(fd, how);
 		kqueue_socket_changed(fd);
+	}
 
 	return ret;
 }

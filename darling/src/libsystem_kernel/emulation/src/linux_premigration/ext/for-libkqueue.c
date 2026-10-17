@@ -45,6 +45,10 @@ int _socket_state_4libkqueue(int fd, struct socket_state_4libkqueue* state) {
 	return socket_state(fd, state);
 };
 
-void _socket_watch_4libkqueue(int delta) {
-	socket_watch(delta);
+int _socket_error_4libkqueue(int fd, int linux_error) {
+	return socket_error(fd, linux_error);
+};
+
+void _socket_watch_4libkqueue(int fd, int delta) {
+	socket_watch(fd, delta);
 };

@@ -22,7 +22,7 @@ long sys_readv_nocancel(int fd, struct iovec* iovp, unsigned int len)
 
 	// on a socket, the error XNU's soreceive() would return (sostate.h)
 	if (ret <= 0 && SOCKET_READ_HOOKED(ret))
-		ret = socket_error_read(fd, ret, 0);
+		ret = socket_error_read(fd, ret, 0, socket_watchers != 0);
 
 	return ret;
 }
