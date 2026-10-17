@@ -1,6 +1,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <libsimple/lock.h>
@@ -473,6 +474,11 @@ static int wl_update(struct workloop* wl, struct wl_knote* kn, struct kevent_qos
 		// (whose ABI aligns a uint64_t to 4, so the plain type would make it a libatomic call).
 		if (addr & 7)
 			return EINVAL;
+#if UINTPTR_MAX < UINT64_MAX
+		// and a 32-bit process's copyin of an address beyond its address space fails with EFAULT
+		if (addr > UINTPTR_MAX)
+			return EFAULT;
+#endif
 		uint64_t value = __atomic_load_n((wl_value_t*) (uintptr_t) addr, __ATOMIC_RELAXED);
 
 		kev->ext[EV_EXTIDX_WL_VALUE] = value;
