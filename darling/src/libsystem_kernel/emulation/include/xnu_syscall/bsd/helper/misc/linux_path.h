@@ -35,8 +35,8 @@ struct linux_path_statx
 long linux_path_statx(int dfd, const char* path, int flags, unsigned int mask, struct linux_path_statx* out);
 
 // The directory the path's last component is in, into out (room for VCHROOT_PATH_MAX). The path is absolute with its
-// symbolic links resolved (vchroot_expand() with VCHROOT_FOLLOW), so this is namei()'s WANTPARENT directory. The root
-// (the "/" the process sees) is its own parent, as namei() returns it for "/".
+// directories resolved (vchroot_expand()'s, which resolves all but a last component it doesn't follow), so this is
+// namei()'s WANTPARENT directory. The root (the "/" the process sees) is its own parent, as namei() returns it for "/".
 long linux_path_parent(const char* path, char* out);
 
 #endif // DARLING_EMULATION_LINUX_PATH_H

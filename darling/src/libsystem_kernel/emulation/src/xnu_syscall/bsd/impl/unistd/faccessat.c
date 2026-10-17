@@ -35,7 +35,8 @@ long sys_faccessat(int fd, const char* filename, int amode, int flag)
 	if (linux_flags == LINUX_AT_INVALID)
 		return -EINVAL;
 	// faccessat2()'s flags (Linux's AT_REMOVEDIR is its AT_EACCESS); AT_EACCESS, which atflags_bsd_to_linux() drops,
-	// checks as the effective ids
+	// checks as the effective ids. With AT_SYMLINK_NOFOLLOW Linux answers by a link's own mode, which is always 0777:
+	// XNU's link modes come from its umask (usually 0755), so XNU may refuse writing a link Linux allows.
 	linux_flags &= LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH;
 	if (flag & BSD_AT_EACCESS)
 		linux_flags |= LINUX_AT_EACCESS;
