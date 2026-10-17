@@ -12,8 +12,8 @@
 #include <darling/emulation/conversion/network/recvmsg.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/network/sendmsg.h>
 
-#define LINUX_SYS_SENDMSG 16
 #define LINUX_MSG_NOSIGNAL 0x4000
 #define LINUX_SIGPIPE 13
 #define LINUX_ENOTSOCK 88

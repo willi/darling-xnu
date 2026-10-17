@@ -1,13 +1,12 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sockutil.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/conversion/network/getsockopt.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 
-#define LINUX_SOL_SOCKET 1
 #define LINUX_SO_COOKIE 57
 #define LINUX_SOL_TCP 6
 #define LINUX_TCP_INFO 11
-#define LINUX_SYS_GETSOCKOPT 15
 #define LINUX_EINVAL 22
 
 long linux_getsockopt(int fd, int level, int name, void* value, unsigned int* len)
