@@ -284,6 +284,13 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 		pipe[1] = ret;
 	}
 
+	// Signals are blocked from here until the fork's locks are released (libSystem's atfork ones, which
+	// posix_spawn_prepare() takes, malloc's among them; fork_special_ports_lock), in the parent, and until its
+	// handlers are reset, in the child. XNU's posix_spawn() holds no lock of the caller's and runs none of its code
+	// in the new process: here a handler that ran while a lock was held, and forked or allocated, found it held by
+	// its own thread; and the child runs its setup before the exec, where none of the caller's handlers may run.
+	caller_mask = signals_block_all();
+
 	// we don't want to call user atfork callbacks, but we *do* want to call most
 	// libsystem atfork callbacks to set up the environment for some of the calls we need
 	// to make for the setup
@@ -299,16 +306,13 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 			nports = 0;
 			if (_libkernel_darling_functions)
 				_libkernel_darling_functions->posix_spawn_parent();
+			signals_restore(caller_mask);
 			close_internal(pipe[0]);
 			close_internal(pipe[1]);
 			goto out;
 		}
 	}
 
-	// XNU's posix_spawn() runs none of the caller's code in the new process. The child here runs its setup
-	// before the exec: with signals blocked from the fork until its handlers are reset, none of the caller's
-	// handlers can run in it.
-	caller_mask = signals_block_all();
 	if ((my_pid = (nports > 0) ? sys_fork_special_ports_locked() : sys_fork()) == 0)
 	{
 		// child
