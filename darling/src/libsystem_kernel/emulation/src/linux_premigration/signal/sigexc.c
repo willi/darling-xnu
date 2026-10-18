@@ -149,6 +149,16 @@ void sigexc_setup(void)
 #endif
 }
 
+// Both handlers talk to darlingserver first, on the thread's own RPC socket, as the thread it registered at its
+// checkin. So no thread runs them before its checkin or after its checkout, which these keep:
+// - a fork child: sys_fork() blocks every signal until the child has checked in (fork.c);
+// - a new thread: mldr's __darling_thread_create and darling_thread_entry (mldr/elfcalls/threads.c);
+// - a thread's end: mldr's __darling_thread_terminate blocks the app's signals before its checkout, the rest after
+//   (darlingserver's own two can still arrive while the checkout is in flight, and their handler's calls then come
+//   after it: a known gap);
+// - exec and a process's start: by construction, as libsystem_kernel installs these handlers (__libkernel_init) after
+//   mldr has checked in.
+// darlingserver logs a thread whose first call isn't its checkin.
 void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
 	int status = dserver_rpc_interrupt_enter();
@@ -269,6 +279,7 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
 #endif
 }
 
+// see sigrt_handler on when it may run
 void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
 	int status = dserver_rpc_interrupt_enter();
