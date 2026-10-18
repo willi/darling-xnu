@@ -66,12 +66,17 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
 static void state_to_kernel(struct linux_ucontext* ctxt, void* tstate, void* fstate);
 
 // Each kern_printf is a darlingserver round trip, about 76 per signal when they're on: keep them off by default.
-// Build with -DDEBUG_SIGEXC=1 to debug this file; tests/signal_flood fails while they are on.
+// Build with -DDEBUG_SIGEXC=1 to debug this file. __simple_vkprintf has a run-time gate too: unless darlingserver
+// logs kprintf strings (DSERVER_LOG_LEVEL info or below, or "kprintf" in DSERVER_LOG_CATEGORIES), a kern_printf
+// then costs a load, not a call. tests/signal_flood fails only when they are on and logged.
 #ifndef DEBUG_SIGEXC
 	#define DEBUG_SIGEXC 0
 #endif
 
 #define kern_printf(...) do { if (DEBUG_SIGEXC) __simple_kprintf(__VA_ARGS__); } while (0)
+
+// whether darlingserver logs kprintf strings; the gate in __simple_vkprintf (simple.c)
+extern bool __simple_kprintf_logged(void);
 
 void sigexc_setup1(void)
 {
@@ -119,6 +124,8 @@ static void handle_rt_signal(int signum)
 
 void sigexc_setup(void)
 {
+	// the first kprintf_logged query is here, structurally: after the checkin, before any handler of this image runs
+	__simple_kprintf_logged();
 	darling_sigexc_self();
 	sigexc_setup1();
 	sigexc_setup2();
@@ -262,7 +269,7 @@ void darling_sigexc_self(void)
 {
 	am_i_ptraced = true;
 
-	__simple_kprintf("darling_sigexc_self()\n");
+	kern_printf("darling_sigexc_self()\n");
 	// Make sigexc_handler the handler for all signals in the process
 	for (int i = 1; i <= 31; i++)
 	{

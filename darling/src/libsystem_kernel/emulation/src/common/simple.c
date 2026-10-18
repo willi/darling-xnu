@@ -7,6 +7,7 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/signal/duct_signals.h>
+#include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
@@ -414,22 +415,27 @@ void __simple_vprintf(const char* format, va_list args)
 
 // Whether darlingserver logs kprintf strings: at its default log level it drops them, after the call. Each call is a
 // round trip, so ask once and make none it would drop. Its answer doesn't change while it runs (it reads its log
-// level once, at its start); a fork child keeps the answer, as it keeps the darlingserver, and an exec asks again.
-// 1, 0, or -1 before the first answer.
+// level once, at its start). The answer is per image: dyld and libsystem_kernel each have this file, and each asks,
+// from sigexc_setup(), after the checkin and before any handler can run. A fork child keeps the answers, as it keeps
+// the darlingserver; an exec asks again. 1, 0, or -1 before the first answer.
 static int kprintf_logged = -1;
 
-static int simple_kprintf_logged(void)
+__attribute__((visibility("hidden")))
+bool __simple_kprintf_logged(void)
 {
 	int logged = __atomic_load_n(&kprintf_logged, __ATOMIC_RELAXED);
 
 	if (logged < 0)
 	{
 		bool answer = true;
+		int code = dserver_rpc_kprintf_logged(&answer);
 
-		// if it can't tell, make the calls, as before
-		if (dserver_rpc_kprintf_logged(&answer) < 0)
-			answer = true;
-		logged = answer ? 1 : 0;
+		// A darlingserver that doesn't know the call answers -ENOSYS: make the calls, as before. That needs one
+		// that answers an unknown call at all (from darlingserver's "calls: answer a dropped call with an error");
+		// an older one ends on it. Any other error may pass (the thread's socket): make this call, and ask again.
+		if (code < 0 && code != -LINUX_ENOSYS)
+			return true;
+		logged = (code < 0 || answer) ? 1 : 0;
 		__atomic_store_n(&kprintf_logged, logged, __ATOMIC_RELAXED);
 	}
 	return logged;
@@ -440,7 +446,7 @@ void __simple_vkprintf(const char* format, va_list args)
 {
 	char buffer[512];
 
-	if (!simple_kprintf_logged())
+	if (!__simple_kprintf_logged())
 		return;
 	__simple_vsnprintf(buffer, sizeof(buffer), format, args);
 	dserver_rpc_kprintf(buffer, __simple_strlen(buffer));
