@@ -63,7 +63,10 @@ static void float_state_to_mcontext(const x86_float_state32_t* s, linux_fpregset
 static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, const void* fstate);
 static void state_to_kernel(struct linux_ucontext* ctxt, void* tstate, void* fstate);
 
-#define DEBUG_SIGEXC
+// Each kern_printf is a darlingserver call: with this defined, a signal makes about 76 of them (its registers, in
+// and out), and costs 20 times more. A thread taking 50 signals a second then never ran between them. Define it to
+// debug this file.
+// #define DEBUG_SIGEXC
 #ifdef DEBUG_SIGEXC
 #define kern_printf(...) __simple_kprintf(__VA_ARGS__)
 #else
