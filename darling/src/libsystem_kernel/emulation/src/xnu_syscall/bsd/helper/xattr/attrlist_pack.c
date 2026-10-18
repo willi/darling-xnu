@@ -547,7 +547,7 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 		put64(&p, VOL, ATTR_VOL_ENCODINGSUSED, 0);
 	if (v & ATTR_VOL_CAPABILITIES)
 	{
-		// as fsgetpath() can find the volume's objects by ID (impl/misc/fsgetpath.c). Without PATH_FROM_ID CFURL has no
+		// as fsgetpath() can find the volume's objects by ID (helper/misc/fileid.c). Without PATH_FROM_ID CFURL has no
 		// _kCFURLFileIDKey for the volume's files, and LaunchServices then registers an app without its executable, as
 		// a placeholder with no SDK version: SpringBoard runs it in a 375x667 compatibility mode.
 		uint32_t caps[8] = {
