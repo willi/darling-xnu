@@ -611,33 +611,56 @@ void float_state_to_mcontext(const x86_float_state32_t* s, linux_fpregset_t fx)
 }
 #endif
 
-void sigexc_thread_setup(void)
-{
-	struct bsd_stack newstack = {
-		.ss_size = default_sigaltstack_size,
-		.ss_flags = 0
-	};
-
+// A thread's alternate signal stack: its handlers run there (LINUX_SA_ONSTACK), with a guard page below it.
 #if SIGALTSTACK_GUARD
-	newstack.ss_sp = (void*) sys_mmap(NULL, newstack.ss_size + 4096, PROT_READ | PROT_WRITE,
-			MAP_ANON | MAP_PRIVATE, -1, 0);
-	sys_mprotect(newstack.ss_sp, 4096, PROT_NONE);
-	newstack.ss_sp = (char*)newstack.ss_sp + 4096;
+	#define SIGEXC_STACK_GUARD 4096
 #else
-	newstack.ss_sp = (void*) sys_mmap(NULL, newstack.ss_size, PROT_READ | PROT_WRITE,
-			MAP_ANON | MAP_PRIVATE, -1, 0);
+	#define SIGEXC_STACK_GUARD 0
 #endif
-	sys_sigaltstack(&newstack, NULL);
+
+int sigexc_thread_setup(void** stack)
+{
+	unsigned long size = default_sigaltstack_size + SIGEXC_STACK_GUARD;
+	void* mapping = sys_mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+
+	// a failed mapping is a negative errno, which sigaltstack() took as the stack
+	if ((intptr_t) mapping < 0 && (intptr_t) mapping >= -4095)
+		return (int) (intptr_t) mapping;
+
+	if (SIGEXC_STACK_GUARD != 0)
+		sys_mprotect(mapping, SIGEXC_STACK_GUARD, PROT_NONE);
+
+	struct bsd_stack newstack = {
+		.ss_sp = (char*) mapping + SIGEXC_STACK_GUARD,
+		.ss_size = default_sigaltstack_size,
+		.ss_flags = 0,
+	};
+	int err = sys_sigaltstack(&newstack, NULL);
+	if (err < 0)
+	{
+		sys_munmap(mapping, size);
+		return err;
+	}
+
+	*stack = mapping;
+	return 0;
 }
 
-void sigexc_thread_exit(void)
+// The thread is ending, with every signal blocked. The app may have given it a stack of its own since; that one is
+// the app's to free.
+void sigexc_thread_teardown(void* stack)
 {
-	struct bsd_stack oldstack;
-	sys_sigaltstack(NULL, &oldstack);
+	struct bsd_stack current;
+	unsigned long size = default_sigaltstack_size + SIGEXC_STACK_GUARD;
 
-#if SIGALTSTACK_GUARD
-	sys_munmap((char*)oldstack.ss_sp - 4096, oldstack.ss_size + 4096);
-#else
-	sys_munmap(oldstack.ss_sp, oldstack.ss_size);
-#endif
+	if (stack == NULL)
+		return;
+
+	if (sys_sigaltstack(NULL, &current) == 0 && current.ss_sp == (char*) stack + SIGEXC_STACK_GUARD)
+	{
+		// Linux's SS_DISABLE, which sys_sigaltstack() would pass on as it is (XNU's is 4)
+		struct linux_stack none = { .ss_flags = 2 };
+		LINUX_SYSCALL(__NR_sigaltstack, &none, NULL);
+	}
+	sys_munmap(stack, size);
 }

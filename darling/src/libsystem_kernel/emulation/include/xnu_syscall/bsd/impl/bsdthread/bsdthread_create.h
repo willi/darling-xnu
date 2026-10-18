@@ -7,10 +7,13 @@
 long sys_bsdthread_create(void* thread_start, void* arg, void* stack,
 		void* pthread, uint32_t flags);
 
-int darling_thread_create(void** stack, void* entry_point, uintptr_t arg3,
-		uintptr_t arg4, uintptr_t arg5, uintptr_t arg6);
+struct darling_thread_create_callbacks;
 
-void* thread_stack_allocate(unsigned long stacksize);
+// What mldr calls back into on a Darwin thread it starts, for bsdthread_create and the workqueue alike
+extern const struct darling_thread_create_callbacks darling_thread_callbacks;
+
+// Guards a thread's darlingserver socket: the app can't close it, and a fork child closes it
+void dserver_rpc_socket_guard(int fd);
 
 bool uses_threads(void);
 
