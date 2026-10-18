@@ -23,6 +23,7 @@
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 #include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
 
 #include <darlingserver/rpc.h>
 
@@ -118,6 +119,7 @@ long sys_fork_special_ports_locked(void)
 		__darling_fork_child();
 		// before any signal handler, which may unmap memory and take the table's lock
 		purgeable_atfork_child();
+		fileid_cache_atfork_child();
 
 #ifndef VARIANT_DYLD
 		// for tests: see __darling_fork_stop_child
