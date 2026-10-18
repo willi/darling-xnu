@@ -101,11 +101,26 @@ struct search
 	long dirs;
 	// whether it gave up at SEARCH_DIRS_MAX
 	int spent;
+	// how the lookup was answered (enum tier)
+	int tier;
 	char path[VCHROOT_PATH_MAX]; // a Linux path; the one found, once found
 	// the path found as the process sees it: outside the prefix, under /Volumes/SystemRoot, so longer than path can be
 	char seen[VCHROOT_PATH_MAX + sizeof("/Volumes/SystemRoot")];
 	struct level levels[DEPTH_MAX];
 };
+
+// How this process's lookups were answered: its own cache serves only IDs it handed out itself, so this is what tells
+// how often an ID from another process (LaunchServices' store, another daemon) costs a probe or a search. Logged with
+// each search and every 256 lookups: a kprintf is a darlingserver call, too dear for every lookup.
+enum tier { TIER_CACHE, TIER_PROBE, TIER_SEARCH, TIER_ABSENT, TIER_OTHER, TIERS };
+static unsigned long tiers[TIERS], lookups;
+
+static void log_tiers(void)
+{
+	__simple_kprintf("fileid: this process's %lu lookups: %lu by its cache, %lu by the probe, %lu searched, %lu "
+		"remembered absent, %lu other\n", lookups, tiers[TIER_CACHE], tiers[TIER_PROBE], tiers[TIER_SEARCH],
+		tiers[TIER_ABSENT], tiers[TIER_OTHER]);
+}
 
 static int append(struct search* s, int at, const char* name)
 {
@@ -370,8 +385,12 @@ static long find_root(struct search* s)
 // the Linux path of (dev, objid) into s->path: 0, or a negative XNU errno
 static long find_object(struct search* s)
 {
+	s->tier = TIER_OTHER;
 	if (fileid_cache_find(s->dev, s->objid, s->path, sizeof(s->path)))
+	{
+		s->tier = TIER_CACHE;
 		return 0;
+	}
 
 	// the volume's root: the hinted mount's, or the first
 	long ret = mounts_each_root_from(s->dev, s->mount_id, first_root, s->path);
@@ -393,9 +412,13 @@ static long find_object(struct search* s)
 	if (s->objid == ROOT_OBJID)
 		return find_root(s);
 	if (fileid_cache_absent(s->dev, s->objid))
+	{
+		s->tier = TIER_ABSENT;
 		return -ENOENT;
+	}
 
 	int there = probe(s);
+	s->tier = there == 0 || there == 1 ? TIER_PROBE : TIER_SEARCH;
 	if (there == 0)
 	{
 		fileid_cache_note_absent(s->dev, s->objid);
@@ -433,6 +456,10 @@ long fileid_find(unsigned long long dev, unsigned long long mount_id, unsigned l
 	s->objid = objid;
 
 	long ret = find_object(s);
+	unsigned long n = __atomic_add_fetch(&lookups, 1, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&tiers[s->tier], 1, __ATOMIC_RELAXED);
+	if (s->tier == TIER_SEARCH || n % 256 == 0)
+		log_tiers();
 	// the path as the process sees it: under the prefix, or /Volumes/SystemRoot outside it
 	if (ret == 0 && vchroot_unexpand_into(s->path, s->seen, sizeof(s->seen)) < 0)
 		ret = -ENOSPC;
