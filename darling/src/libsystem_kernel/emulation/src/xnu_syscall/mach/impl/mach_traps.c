@@ -11,6 +11,7 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/xnu_syscall/mach/impl/mach_traps.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 #include <darling/emulation/linux_premigration/ext/mremap.h>
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/duct_errno.h>
@@ -377,6 +378,9 @@ kern_return_t _kernelrpc_mach_vm_map_trap_impl(
 	}
 
 	*address = (uintptr_t)addr;
+	// vm_map_enter() makes VM_FLAGS_PURGABLE memory a purgeable object, non-volatile at first
+	if (flags & VM_FLAGS_PURGABLE)
+		purgeable_add((uintptr_t) addr, size);
 	return KERN_SUCCESS;
 }
 

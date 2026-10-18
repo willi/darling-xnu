@@ -19,6 +19,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
+#include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 
 #include <darlingserver/rpc.h>
 
@@ -58,6 +59,8 @@ long sys_fork_special_ports_locked(void)
 	{
 		// in the child
 		__darling_fork_child();
+		// before a signal handler can unmap memory, which takes the table's lock
+		purgeable_atfork_child();
 
 #ifndef VARIANT_DYLD
 		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
