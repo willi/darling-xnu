@@ -62,6 +62,9 @@ int signum_linux_to_bsd(int signum)
 			return SIGUSR1;
 		case LINUX_SIGUSR2:
 			return SIGUSR2;
+		// SIGINFO is sent as SIGPWR (signum_bsd_to_linux())
+		case LINUX_SIGPWR:
+			return SIGINFO;
 		// Hack! This is what we send instead of SIGSTOP to allow the target process to receive the signal
 		// and pass it through the LKM.
 		case LINUX_SIGSTKFLT:

@@ -26,6 +26,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/guarded/guarded_kqueue_np.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/guarded/guarded_open_np.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/hfs/stub.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ffsctl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ioctl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent64.h>
@@ -369,8 +370,10 @@ void* __bsd_syscall_table[600] = {
 	[239] = sys_fremovexattr,
 	[240] = sys_listxattr,
 	[241] = sys_flistxattr,
+	[242] = sys_fsctl,
 	[243] = sys_initgroups,
 	[244] = sys_posix_spawn,
+	[245] = sys_ffsctl,
 	[254] = sys_semctl,
 	[255] = sys_semget,
 	[256] = sys_semop,

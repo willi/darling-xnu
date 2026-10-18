@@ -10,6 +10,8 @@
 // - It counts deliveries, not attempts to send: Linux merges a signal sent again while it is pending.
 // - SIGCHLD and SIGTTOU at their default disposition (or ignored) aren't seen: Darling installs no handler for them.
 // - A signal that a debugger drops through darlingserver isn't seen, and one it changes is seen as the new signal.
+// - A signal ignored by default (SIGURG, SIGIO, SIGWINCH, SIGINFO) that the process blocks stays pending, where XNU
+//   discards it once it's posted (bsd/kern/kern_sig.c): sigpending() shows it, and sigwait() returns it.
 
 // Returns an eventfd that counts deliveries of the BSD signal signum, or a negative Linux errno. Only
 // signal_knote_close() closes it: Darling's close() and dup2() refuse to, and a fork's child doesn't inherit it.
