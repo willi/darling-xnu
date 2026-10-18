@@ -72,12 +72,26 @@ struct parked_thread
 	TAILQ_ENTRY(parked_thread) entries;
 };
 
-// a workq_thread_request() answered by a new thread
+// a workq_thread_request() answered by a new thread, or one no thread could be started for yet
 struct workq_request
 {
 	workq_prepare_f prepare;
 	void* context;
+	struct workq_request* next;
 };
+
+// Requests no thread could be started for. XNU keeps such a request queued and retries it
+// (workq_schedule_delayed_thread_creation(), bsd/pthread/pthread_workqueue.c), and so does this: each requester has
+// marked a thread as on its way (libdispatch's dgq_pending for a root queue, the kevent workqueue's manager, a
+// workloop's servicer) and asks for none again until it comes. A thread that parks takes the oldest instead, and the
+// next workq_thread_request() or WQOPS_QUEUE_REQTHREADS starts threads for them first. Unlike XNU, no timer retries
+// them. Guarded by workq_parked_lock.
+static struct workq_request* workq_unserved_head;
+static struct workq_request** workq_unserved_tail = &workq_unserved_head;
+// WQOPS_QUEUE_REQTHREADS's, by the threads' flags, oldest first: a QoS class, overcommit or cooperative
+#define WQ_UNSERVED_KINDS 32
+static struct { int flags; int count; } workq_unserved_threads[WQ_UNSERVED_KINDS];
+static int workq_unserved_kinds;
 
 static void list_add(struct parked_thread* head, struct parked_thread* item);
 static void list_remove(struct parked_thread* head, struct parked_thread* item);
@@ -135,10 +149,172 @@ static void workq_requested_thread_start(void* self, int thread_port, void* stac
 		batch.flags | (flags & WQ_FLAG_THREAD_TSD_BASE_SET), batch.nevents);
 }
 
+static bool workq_start_requested_thread(struct workq_request* request)
+{
+	return __darling_thread_create(512*1024, pthread_obj_size, workq_requested_thread_start, 0, (uintptr_t) request,
+			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0,
+			&darling_thread_callbacks, NULL) != NULL;
+}
+
+// a thread for WQOPS_QUEUE_REQTHREADS, which holds a running-thread slot
+static bool workq_start_thread(int flags)
+{
+	return __darling_thread_create(512*1024, pthread_obj_size, wqueue_entry_point_wrapper, 0,
+			0, flags, 0, &darling_thread_callbacks, NULL) != NULL;
+}
+
+// The unserved requests, all with workq_parked_lock held.
+
+static struct workq_request* workq_unserved_take_request(void)
+{
+	struct workq_request* request = workq_unserved_head;
+
+	if (request != NULL)
+	{
+		workq_unserved_head = request->next;
+		if (workq_unserved_head == NULL)
+			workq_unserved_tail = &workq_unserved_head;
+	}
+	return request;
+}
+
+// `oldest`: one that was taken, back where it was
+static void workq_unserved_put_request(struct workq_request* request, bool oldest)
+{
+	if (oldest)
+	{
+		request->next = workq_unserved_head;
+		if (workq_unserved_head == NULL)
+			workq_unserved_tail = &request->next;
+		workq_unserved_head = request;
+	}
+	else
+	{
+		request->next = NULL;
+		*workq_unserved_tail = request;
+		workq_unserved_tail = &request->next;
+	}
+}
+
+static bool workq_unserved_take_thread(int* flags)
+{
+	int i;
+
+	if (workq_unserved_kinds == 0)
+		return false;
+
+	*flags = workq_unserved_threads[0].flags;
+	if (--workq_unserved_threads[0].count == 0)
+	{
+		for (i = 1; i < workq_unserved_kinds; i++)
+			workq_unserved_threads[i - 1] = workq_unserved_threads[i];
+		workq_unserved_kinds--;
+	}
+	return true;
+}
+
+static void workq_unserved_put_threads(int flags, int count)
+{
+	int i;
+
+	for (i = 0; i < workq_unserved_kinds; i++)
+	{
+		if (workq_unserved_threads[i].flags == flags)
+		{
+			workq_unserved_threads[i].count += count;
+			return;
+		}
+	}
+
+	// libpthread's flags make far fewer kinds
+	if (workq_unserved_kinds == WQ_UNSERVED_KINDS)
+	{
+		__simple_fprintf(2, "workq: too many kinds of unserved thread requests; %d lost\n", count);
+		return;
+	}
+	workq_unserved_threads[workq_unserved_kinds].flags = flags;
+	workq_unserved_threads[workq_unserved_kinds].count = count;
+	workq_unserved_kinds++;
+}
+
+// A thread may have parked between a failed start and the lock: it takes what it can now, as it would have at its park
+static void workq_unserved_to_parked(void)
+{
+	struct parked_thread* thread;
+	struct workq_request* request;
+	int flags;
+
+	while ((thread = workq_parked_head.tqh_first) != NULL)
+	{
+		if ((request = workq_unserved_take_request()) != NULL)
+		{
+			thread->prepare = request->prepare;
+			thread->context = request->context;
+			free(request);
+		}
+		else if (workq_unserved_kinds > 0 && sem_down(&workq_sem, 0))
+		{
+			workq_unserved_take_thread(&flags);
+			thread->flags = flags;
+			thread->prepare = NULL;
+			thread->context = NULL;
+		}
+		else
+			break;
+
+		TAILQ_REMOVE(&workq_parked_head, thread, entries);
+		sem_up(&thread->sem);
+	}
+}
+
+// Starts threads for unserved requests, oldest first, until one can't start, or no running-thread slot is free for a
+// WQOPS_QUEUE_REQTHREADS one (a thread that parks takes it then).
+static void workq_retry_unserved(void)
+{
+	struct workq_request* request;
+	int flags;
+
+	if (__atomic_load_n(&workq_unserved_head, __ATOMIC_RELAXED) == NULL
+			&& __atomic_load_n(&workq_unserved_kinds, __ATOMIC_RELAXED) == 0)
+		return;
+
+	for (;;)
+	{
+		libsimple_lock_lock(&workq_parked_lock);
+		request = workq_unserved_take_request();
+		// a REQTHREADS thread takes a slot, as WQOPS_QUEUE_REQTHREADS does, but this doesn't wait for one
+		if (request == NULL && (workq_unserved_kinds == 0 || !sem_down(&workq_sem, 0)))
+		{
+			libsimple_lock_unlock(&workq_parked_lock);
+			return;
+		}
+		if (request == NULL)
+			workq_unserved_take_thread(&flags);
+		libsimple_lock_unlock(&workq_parked_lock);
+
+		if ((request != NULL) ? workq_start_requested_thread(request) : workq_start_thread(flags))
+			continue;
+
+		libsimple_lock_lock(&workq_parked_lock);
+		if (request != NULL)
+			workq_unserved_put_request(request, true);
+		else
+		{
+			workq_unserved_put_threads(flags, 1);
+			sem_up(&workq_sem);
+		}
+		workq_unserved_to_parked();
+		libsimple_lock_unlock(&workq_parked_lock);
+		return;
+	}
+}
+
 void workq_thread_request(workq_prepare_f prepare, void* context)
 {
 	struct parked_thread* thread;
 	struct workq_request* request;
+
+	workq_retry_unserved();
 
 	libsimple_lock_lock(&workq_parked_lock);
 
@@ -158,18 +334,19 @@ void workq_thread_request(workq_prepare_f prepare, void* context)
 	request = calloc(1, sizeof(*request));
 	if (request == NULL)
 	{
-		__simple_printf("workq: out of memory for a thread request\n");
+		__simple_fprintf(2, "workq: out of memory for a thread request\n");
 		__simple_abort();
 	}
 	request->prepare = prepare;
 	request->context = context;
 
-	if (__darling_thread_create(512*1024, pthread_obj_size, workq_requested_thread_start, 0, (uintptr_t) request,
-			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0, &darling_thread_callbacks, NULL) == NULL)
+	if (!workq_start_requested_thread(request))
 	{
-		// lost, as a REQTHREADS request below is
-		__simple_printf("workq: couldn't start a thread for a request\n");
-		free(request);
+		__simple_fprintf(2, "workq: couldn't start a thread for a request; it waits for the next thread\n");
+		libsimple_lock_lock(&workq_parked_lock);
+		workq_unserved_put_request(request, false);
+		workq_unserved_to_parked();
+		libsimple_lock_unlock(&workq_parked_lock);
 	}
 }
 
@@ -179,6 +356,7 @@ static void __attribute__((noreturn)) workq_thread_park(bool counted)
 {
 	struct parked_thread me;
 	struct workq_batch batch;
+	struct workq_request* request;
 
 park:
 	libsimple_lock_lock(&workq_parked_lock);
@@ -190,6 +368,27 @@ park:
 
 	// `_start_wqthread` requires valid flags even when the thread is only resumed to terminate
 	me.flags = extract_wq_flags(_pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_QOS_CLASS));
+
+	// a request no thread could be started for is this thread's, instead of a park
+	if ((request = workq_unserved_take_request()) != NULL)
+	{
+		// requests don't count against WQ_MAX_THREADS
+		if (counted)
+			sem_up(&workq_sem);
+		counted = false;
+		libsimple_lock_unlock(&workq_parked_lock);
+		me.prepare = request->prepare;
+		me.context = request->context;
+		free(request);
+		goto woken;
+	}
+	// a REQTHREADS one keeps the running-thread slot this thread holds, or takes one
+	if (workq_unserved_kinds > 0 && (counted || sem_down(&workq_sem, 0)))
+	{
+		workq_unserved_take_thread(&me.flags);
+		libsimple_lock_unlock(&workq_parked_lock);
+		goto woken;
+	}
 
 	// Enqueue for future requests
 	TAILQ_INSERT_HEAD(&workq_parked_head, &me, entries);
@@ -224,7 +423,8 @@ park:
 	}
 
 woken:
-	// Whoever woke us up has unlinked `me` and is done with it, so the stack it lives on may be reused.
+	// Whoever woke us up has unlinked `me` and is done with it, so the stack it lives on may be reused (or `me` was
+	// never linked: an unserved request).
 	if (me.prepare == NULL)
 		batch = (struct workq_batch) { .events = NULL, .nevents = 0, .flags = me.flags };
 	else if (!me.prepare(me.context, &batch))
@@ -244,6 +444,10 @@ void workq_atfork_child(void)
 	workq_parked_lock = (libsimple_lock_t) LIBSIMPLE_LOCK_INITIALIZER;
 	TAILQ_INIT(&workq_parked_head);
 	workq_sem = WQ_MAX_THREADS;
+	// the parent's requests aren't the child's; their memory stays, as this may not free
+	workq_unserved_head = NULL;
+	workq_unserved_tail = &workq_unserved_head;
+	workq_unserved_kinds = 0;
 }
 #else
 void workq_atfork_child(void)
@@ -286,6 +490,9 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 
 			// __simple_printf("Thread requested with prio %d\n", prio & WQ_FLAG_THREAD_PRIOMASK);
 
+			// older requests first
+			workq_retry_unserved();
+
 			for (i = 0; i < affinity; i++)
 			{
 				// Increase the amount of running threads
@@ -319,13 +526,16 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 				libsimple_lock_unlock(&workq_parked_lock);
 
 				// __simple_printf("Spawning a new thread\n");
-				if (__darling_thread_create(512*1024, pthread_obj_size, wqueue_entry_point_wrapper, 0,
-						NULL, flags, 0, &darling_thread_callbacks, NULL) == NULL)
+				if (!workq_start_thread(flags))
 				{
-					// XNU keeps such a request queued and retries (workq_schedule_delayed_thread_creation() in
-					// bsd/pthread/pthread_workqueue.c); here it's lost, but its running-thread slot comes back
-					__simple_printf("workq: couldn't start a thread\n");
+					// kept for a retry, with the rest of this request: they would fail the same way now
+					__simple_fprintf(2, "workq: couldn't start a thread; %d wait for the next ones\n", affinity - i);
+					libsimple_lock_lock(&workq_parked_lock);
 					sem_up(&workq_sem);
+					workq_unserved_put_threads(flags, affinity - i);
+					workq_unserved_to_parked();
+					libsimple_lock_unlock(&workq_parked_lock);
+					break;
 				}
 			}
 			return 0;

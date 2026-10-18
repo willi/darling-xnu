@@ -46,7 +46,8 @@ struct workq_batch
 typedef bool (*workq_prepare_f)(void* context, struct workq_batch* batch);
 
 // Wakes up a parked thread, or starts a new one, to call `prepare` and enter libdispatch. These threads don't
-// count against the limit of WQOPS_QUEUE_REQTHREADS threads, so a request never blocks.
+// count against the limit of WQOPS_QUEUE_REQTHREADS threads, so a request never blocks. If no thread can start, the
+// request waits for the next one that does: a thread that parks, or one started for a later request.
 void workq_thread_request(workq_prepare_f prepare, void* context);
 
 // From a workqueue thread that has been in libdispatch: enters it again with `batch`.
