@@ -60,6 +60,8 @@ struct search
 {
 	unsigned long long dev, objid;
 	char path[VCHROOT_PATH_MAX]; // a Linux path; the one found, once found
+	// the path found as the process sees it: outside the prefix, under /Volumes/SystemRoot, so longer than path can be
+	char seen[VCHROOT_PATH_MAX + sizeof("/Volumes/SystemRoot")];
 	struct level levels[DEPTH_MAX];
 };
 
@@ -76,7 +78,8 @@ static int append(struct search* s, int at, const char* name)
 	return at + 1 + n;
 }
 
-// searches the mount at mount_point: 1 when s->path names the object, 0 when it isn't there
+// searches the mount at mount_point: 1 when s->path names the object, 0 when it isn't there, -ENOSPC when it is but its
+// path is too long to give (as XNU's build_path())
 static int search_mount(const char* mount_point, void* ctx)
 {
 	struct search* s = ctx;
@@ -128,11 +131,9 @@ static int search_mount(const char* mount_point, void* ctx)
 		if (st.st_ino == s->objid && (uint32_t) st.st_dev == s->dev)
 		{
 			int end = append(s, l->pathlen, d->d_name);
-			if (end < 0)
-				continue;
 			for (; depth >= 0; depth--)
 				close_internal(s->levels[depth].fd);
-			return 1;
+			return end < 0 ? -ENOSPC : 1;
 		}
 		// into a directory on the same device; one that can't be read (EACCES) has nothing to find
 		if ((st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR || (uint32_t) st.st_dev != s->dev || depth + 1 >= DEPTH_MAX)
@@ -209,14 +210,14 @@ long sys_fsgetpath_ext(char* buf, unsigned long size, void* fsid, unsigned long 
 	if (ret == 0)
 	{
 		// the path as the process sees it: under the prefix, or /Volumes/SystemRoot outside it
-		struct vchroot_unexpand_args vc;
 		vchroot_is_root(s->path); // vchroot_unexpand() needs the prefix, which this makes known
-		for (unsigned i = 0; i < sizeof(vc.path); i++)
-			if (!(vc.path[i] = s->path[i]))
-				break;
-		vchroot_unexpand(&vc);
+		if (vchroot_unexpand_into(s->path, s->seen, sizeof(s->seen)) < 0)
+			ret = -ENOSPC;
+	}
+	if (ret == 0)
+	{
 		unsigned long length = 0;
-		while (vc.path[length])
+		while (s->seen[length])
 			length++;
 		length++;
 		if (length > size)
@@ -226,7 +227,7 @@ long sys_fsgetpath_ext(char* buf, unsigned long size, void* fsid, unsigned long 
 		else
 		{
 			for (unsigned long i = 0; i < length; i++)
-				buf[i] = vc.path[i];
+				buf[i] = s->seen[i];
 			ret = (long) length;
 		}
 	}
