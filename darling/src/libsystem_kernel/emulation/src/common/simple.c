@@ -5,6 +5,7 @@
 #include <sys/signal.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/conversion/signal/duct_signals.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
@@ -579,5 +580,13 @@ have_nl:
 __attribute__ ((visibility ("default")))
 void __simple_abort(void) {
 	sys_kill(sys_getpid(), SIGABRT, 1);
+
+	// Still here: this thread blocks SIGABRT (as a fork child does until its checkin), or a handler returned. Unblock
+	// it and send it again; it's taken before the system call returns. If even that comes back, exit 134, as a shell
+	// reports a SIGABRT death.
+	unsigned long long abrt = 1ull << (LINUX_SIGABRT - 1);
+	LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */, &abrt, NULL, sizeof(abrt));
+	sys_kill(sys_getpid(), SIGABRT, 1);
+	LINUX_SYSCALL1(__NR_exit_group, 128 + LINUX_SIGABRT);
 	__builtin_unreachable();
 };
