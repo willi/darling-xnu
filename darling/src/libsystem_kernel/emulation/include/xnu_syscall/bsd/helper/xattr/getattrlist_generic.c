@@ -13,6 +13,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
 
 // getattrlist(), fgetattrlist() and getattrlistat(): the attributes of an object, or of the volume it is on, packed as
 // attrlist_pack.h says.
@@ -47,7 +48,9 @@ struct object
 	struct attrlist_object obj;
 };
 
+#define ATTR_CMN_OBJID 0x00000020
 #define ATTR_CMN_PAROBJID 0x00000080
+#define ATTR_CMN_FILEID 0x02000000
 #define ATTR_CMN_FULLPATH 0x08000000
 #define ATTR_CMN_PARENTID 0x40000000
 #define ATTR_DIR_MOUNTSTATUS 0x00000004
@@ -127,13 +130,18 @@ static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrl
 	return 0;
 }
 
-static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out)
+// linux_path: the absolute Linux path objfd was opened by, or NULL
+static long pack_object(int objfd, const char* linux_path, const struct xnu_attrlist* alist, unsigned long options,
+	char* out)
 {
 	struct object o;
 	long rv = describe(objfd, alist, options, &o);
 
 	if (rv < 0)
 		return rv;
+	// an ID handed out by path, which fsgetpath() can then answer without a search
+	if (linux_path && (alist->commonattr & (ATTR_CMN_OBJID | ATTR_CMN_FILEID)))
+		fileid_cache_note((unsigned int) o.st.st_dev, o.st.st_ino, linux_path);
 	rv = attrlist_check(alist, options, (o.st.st_mode & LINUX_S_IFMT) == LINUX_S_IFDIR);
 	if (rv < 0)
 		return rv;
@@ -214,7 +222,12 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 #else
 		int objfd = fd;
 #endif
-		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, alist, options, out);
+#if HAS_PATH
+		const char* linux_path = vc.path;
+#else
+		const char* linux_path = 0;
+#endif
+		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, linux_path, alist, options, out);
 #if HAS_PATH
 		close_internal(objfd);
 #endif
