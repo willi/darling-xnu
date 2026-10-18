@@ -211,8 +211,8 @@ static int search_mount(const char* mount_point, void* ctx)
 }
 
 // whether the object is on the file system mounted at mount_point, by open_by_handle_at(): 1 and its path in s->path,
-// 2 when it is but Linux doesn't know a path to it through this mount, 0 when no such object is there, or -1 when that
-// can't be told (not ext4, no CAP_DAC_READ_SEARCH)
+// 2 when it is but Linux doesn't know a path to it through this mount, 0 when no such object is there (or it has no
+// links: removed, but still open), or -1 when that can't be told (not ext4, no CAP_DAC_READ_SEARCH)
 static int probe_at(struct search* s, const char* mount_point)
 {
 	struct
@@ -241,6 +241,12 @@ static int probe_at(struct search* s, const char* mount_point)
 		return 0;
 	if (fd < 0)
 		return -1;
+	// removed, but still open somewhere: no path leads to it
+	if (LINUX_SYSCALL(__NR_fstatat64, fd, "", &st, LINUX_AT_EMPTY_PATH) == 0 && st.st_nlink == 0)
+	{
+		close_internal(fd);
+		return 0;
+	}
 
 	__simple_sprintf(proc, "/proc/self/fd/%d", fd);
 	long n = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, proc, s->path, sizeof(s->path) - 1);
