@@ -594,19 +594,27 @@ no_fork:
 			envp = new_envp;
 		}
 
-		if (forked)
+		// POSIX_SPAWN_SETSIGDEF: these signals start with their default action, ignored ones too (XNU's
+		// posix_spawn(), bsd/kern/kern_exec.c)
+		unsigned int sigdefault = (desc && desc->attrp && (desc->attrp->psa_flags & POSIX_SPAWN_SETSIGDEF))
+			? desc->attrp->psa_sigdefault : 0;
+		if (forked || sigdefault != 0)
 		{
-			// The exec would reset the handled signals to their defaults: do it first, so that a signal taken
-			// once they are unblocked gets the default action, as in the new image. Then take the mask the new
-			// image starts with.
+			// The exec would reset the handled signals to their defaults: the forked child does it first, so
+			// that a signal taken once they are unblocked gets the default action, as in the new image.
 			struct bsd___sigaction dfl = { .sa_sigaction = XNU_SIG_DFL };
 			for (int sig = 1; sig < 32; sig++)
 			{
 				struct bsd_sigaction old;
-				if (sys_sigaction(sig, NULL, &old) == 0 && old.sa_sigaction != XNU_SIG_DFL
-						&& old.sa_sigaction != XNU_SIG_IGN)
+				if ((sigdefault & (1u << (sig - 1))) || (forked && sys_sigaction(sig, NULL, &old) == 0
+						&& old.sa_sigaction != XNU_SIG_DFL && old.sa_sigaction != XNU_SIG_IGN))
 					sys_sigaction(sig, &dfl, NULL);
 			}
+		}
+
+		if (forked)
+		{
+			// then the mask the new image starts with
 
 			linux_sigset_t start_mask = caller_mask;
 			if (desc && desc->attrp && (desc->attrp->psa_flags & POSIX_SPAWN_SETSIGMASK))
