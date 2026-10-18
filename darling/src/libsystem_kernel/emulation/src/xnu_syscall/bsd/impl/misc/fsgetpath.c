@@ -141,7 +141,7 @@ static int search_mount(const char* mount_point, void* ctx)
 	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, s->path, LINUX_O_RDONLY | LINUX_O_DIRECTORY | LINUX_O_CLOEXEC, 0);
 	if (fd < 0)
 		return 0;
-	if (LINUX_SYSCALL(__NR_fstatat64, fd, "", &st, LINUX_AT_EMPTY_PATH) == 0 && (uint32_t) st.st_dev == s->dev &&
+	if (LINUX_SYSCALL(__NR_fstatat64, fd, "", &st, LINUX_AT_EMPTY_PATH) == 0 && mounts_volume(st.st_dev) == s->dev &&
 		st.st_ino == s->objid)
 	{
 		close_internal(fd);
@@ -175,10 +175,10 @@ static int search_mount(const char* mount_point, void* ctx)
 		if (LINUX_SYSCALL(__NR_fstatat64, l->fd, d->d_name, &st, LINUX_AT_SYMLINK_NOFOLLOW) < 0)
 			continue;
 		int is_dir = (st.st_mode & LINUX_S_IFMT) == LINUX_S_IFDIR;
-		if ((uint32_t) st.st_dev == s->dev && is_dir)
+		if (mounts_volume(st.st_dev) == s->dev && is_dir)
 			s->found_dev = 1;
 		// a subvolume's ID 2, its root, as a volume's (it has no inode 2)
-		if ((uint32_t) st.st_dev == s->dev && (st.st_ino == s->objid ||
+		if (mounts_volume(st.st_dev) == s->dev && (st.st_ino == s->objid ||
 			(s->subvolumes && s->objid == ROOT_OBJID && is_dir && st.st_ino == BTRFS_FIRST_FREE_OBJECTID)))
 		{
 			int end = append(s, l->pathlen, d->d_name);
@@ -188,7 +188,7 @@ static int search_mount(const char* mount_point, void* ctx)
 		}
 		// into a directory on the same device, or on btrfs into a subvolume; one that can't be read (EACCES) has
 		// nothing to find
-		if (!is_dir || ((uint32_t) st.st_dev != s->dev && !s->subvolumes) || depth + 1 >= DEPTH_MAX)
+		if (!is_dir || (mounts_volume(st.st_dev) != s->dev && !s->subvolumes) || depth + 1 >= DEPTH_MAX)
 			continue;
 		int end = append(s, l->pathlen, d->d_name);
 		if (end < 0)
@@ -249,7 +249,7 @@ static int probe_at(struct search* s, const char* mount_point)
 	s->path[n] = '\0';
 	// a path Linux has for it, if it leads there (a disconnected one is just "/", or a name)
 	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, s->path, &st, LINUX_AT_SYMLINK_NOFOLLOW) < 0 ||
-		(uint32_t) st.st_dev != s->dev || st.st_ino != s->objid)
+		mounts_volume(st.st_dev) != s->dev || st.st_ino != s->objid)
 		return 2;
 	return 1;
 }
@@ -521,7 +521,7 @@ int fsgetpath_volume_searchable(int fd)
 	if ((unsigned long) s > (unsigned long) -4096)
 		return 0;
 	// objects on a device no mount is of (an overlay's file) can't be searched for
-	int ret = mounts_each_root((uint32_t) st.st_dev, first_root, s->path) > 0;
+	int ret = mounts_each_root(mounts_volume(st.st_dev), first_root, s->path) > 0;
 	if (ret && type == LINUX_OVERLAYFS_SUPER_MAGIC)
 		ret = overlay_reports_its_device(s);
 	LINUX_SYSCALL(__NR_munmap, s, map_size);

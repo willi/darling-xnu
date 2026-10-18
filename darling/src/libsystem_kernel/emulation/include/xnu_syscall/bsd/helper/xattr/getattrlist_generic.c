@@ -150,7 +150,7 @@ static long pack_object(int objfd, const char* linux_path, const struct xnu_attr
 		return rv;
 	// an ID handed out by path, which fsgetpath() can then answer without a search
 	if (linux_path && (alist->commonattr & (ATTR_CMN_OBJID | ATTR_CMN_FILEID)))
-		fileid_cache_note((unsigned int) o.st.st_dev, o.st.st_ino, linux_path);
+		fileid_cache_note(o.st.st_dev, o.st.st_ino, linux_path);
 	rv = attrlist_check(alist, options, (o.st.st_mode & LINUX_S_IFMT) == LINUX_S_IFDIR);
 	if (rv < 0)
 		return rv;

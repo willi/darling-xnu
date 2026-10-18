@@ -6,8 +6,8 @@
 // file or object ID for (stat() doesn't: dyld and CF stat thousands of files, which would push those out); a lookup
 // checks that the path still names that object.
 
-// notes that the absolute Linux path names the object (dev, ino), dev as the 32 bits statfs()'s f_fsid and ATTR_CMN_FSID
-// have; paths too long to keep are skipped
+// notes that the absolute Linux path names the object (dev, ino); paths too long to keep are skipped. Here, dev is a
+// Linux device or the volume it is: only the volume (mounts_volume()) is kept and compared
 void fileid_cache_note(unsigned long long dev, unsigned long long ino, const char* linux_path);
 
 // the absolute Linux path last noted for (dev, ino) into linux_path (size bytes), if it still names that object

@@ -379,7 +379,7 @@ static int device_root(const struct mountinfo* m, void* ctx)
 	if ((d->only > 0 && m->id != d->id) || (d->only < 0 && m->id == d->id))
 		return 0;
 	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, m->on, &st, 0) < 0 || (st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR ||
-		(!d->type && (unsigned int) st.st_dev != d->dev))
+		(!d->type && mounts_volume(st.st_dev) != d->dev))
 		return 0;
 	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, m->on, LINUX_O_PATH | LINUX_O_CLOEXEC, 0);
 	if (fd < 0)

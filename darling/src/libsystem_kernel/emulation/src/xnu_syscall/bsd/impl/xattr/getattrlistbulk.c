@@ -52,7 +52,7 @@ static void note(const char* dir_path, const char* name, const struct linux_stat
 	if (n >= NOTED_PATH_MAX - 1)
 		return;
 	path[n] = '\0';
-	fileid_cache_note((unsigned int) st->st_dev, st->st_ino, path);
+	fileid_cache_note(st->st_dev, st->st_ino, path);
 }
 
 // one entry into out (ATTRLIST_PACK_MAX bytes); returns its size, or 0 to leave the entry out

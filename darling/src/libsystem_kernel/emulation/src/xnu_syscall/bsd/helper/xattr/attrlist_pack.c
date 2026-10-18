@@ -332,7 +332,7 @@ static void pack_common(struct packer* p, uint32_t c, const struct attrlist_obje
 	if (c & ATTR_CMN_NAME)
 		put_ref(p, CMN, ATTR_CMN_NAME, obj->name);
 	if (c & ATTR_CMN_DEVID)
-		put32(p, CMN, ATTR_CMN_DEVID, (uint32_t) st->st_dev);
+		put32(p, CMN, ATTR_CMN_DEVID, mounts_volume(st->st_dev));
 	if (c & ATTR_CMN_FSID)
 		put64(p, CMN, ATTR_CMN_FSID, mounts_fsid(st->st_dev, obj->mount_id));
 	if (c & ATTR_CMN_OBJTYPE)
@@ -455,7 +455,7 @@ uint32_t attrlist_pack(const struct xnu_attrlist* al, uint64_t options, const st
 	if (x & ATTR_CMNEXT_NOFIRMLINKPATH)
 		put_ref(&p, EXT, ATTR_CMNEXT_NOFIRMLINKPATH, obj->fullpath);
 	if (x & ATTR_CMNEXT_REALDEVID)
-		put32(&p, EXT, ATTR_CMNEXT_REALDEVID, (uint32_t) st->st_dev);
+		put32(&p, EXT, ATTR_CMNEXT_REALDEVID, mounts_volume(st->st_dev));
 	if (x & ATTR_CMNEXT_REALFSID)
 		put64(&p, EXT, ATTR_CMNEXT_REALFSID, mounts_fsid(st->st_dev, obj->mount_id));
 	if (x & ATTR_CMNEXT_CLONEID)
