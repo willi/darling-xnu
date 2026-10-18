@@ -18,6 +18,7 @@
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 #include <darling/emulation/linux_premigration/signal/exec_signals.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/conversion/duct_errno.h>
 
 #include <darlingserver/rpc.h>
 
@@ -218,6 +219,11 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 		return;
 
 	int status = dserver_rpc_interrupt_enter();
+
+	// darlingserver saw this thread die (its checkout) before it got to the interrupt_enter: there's nothing to suspend
+	// or run, and the call the signal interrupted takes its reply, which comes after this one
+	if (status == -LINUX_ESRCH)
+		return;
 
 	if (status != 0) {
 		__simple_printf("*** dserver_rpc_interrupt_enter failed with code %d ***\n", status);
