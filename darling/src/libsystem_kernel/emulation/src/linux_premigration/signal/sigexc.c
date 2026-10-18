@@ -275,9 +275,19 @@ void darling_sigexc_self(void)
 		sa.sa_flags = LINUX_SA_RESTORER | LINUX_SA_SIGINFO | LINUX_SA_RESTART | LINUX_SA_ONSTACK;
 		sa.sa_restorer = sig_restorer;
 
-		LINUX_SYSCALL(__NR_rt_sigaction, i,
-				&sa, NULL,
-				sizeof(sa.sa_mask));
+		// A signal ignored before the exec stays ignored, as the app has it (execve.c, exec_keep_ignored()).
+		// dyld runs this before libsystem_kernel does, each with its own sig_handlers, and the app's sigaction()
+		// reads libsystem_kernel's: dyld leaves such a signal ignored, for libsystem_kernel to find.
+		struct linux_sigaction old;
+		if (LINUX_SYSCALL(__NR_rt_sigaction, i, NULL, &old, sizeof(sa.sa_mask)) == 0
+				&& old.sa_sigaction == (linux_sig_handler*) 1 /* SIG_IGN */)
+		{
+			sig_handlers[i] = XNU_SIG_IGN;
+#ifdef VARIANT_DYLD
+			continue;
+#endif
+		}
+		LINUX_SYSCALL(__NR_rt_sigaction, i, &sa, NULL, sizeof(sa.sa_mask));
 	}
 
 #if SIGALTSTACK_GUARD
