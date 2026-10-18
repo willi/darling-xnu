@@ -1,4 +1,5 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/common_at.h>
@@ -67,6 +68,7 @@ static long long now_ns(void)
 
 void fileid_cache_note_absent(unsigned long long dev, unsigned long long ino)
 {
+	dev = mounts_volume(dev);
 	struct absent* a = &absents[hash(dev, ino) % ABSENT_SLOTS];
 	long long t = now_ns();
 	if (!t || !take(&a->busy))
@@ -79,6 +81,7 @@ void fileid_cache_note_absent(unsigned long long dev, unsigned long long ino)
 
 int fileid_cache_absent(unsigned long long dev, unsigned long long ino)
 {
+	dev = mounts_volume(dev);
 	struct absent* a = &absents[hash(dev, ino) % ABSENT_SLOTS];
 	int found = 0;
 	long long t = now_ns();
@@ -108,6 +111,8 @@ void fileid_cache_note(unsigned long long dev, unsigned long long ino, const cha
 {
 	unsigned long n = 0;
 
+	dev = mounts_volume(dev);
+
 	if (!linux_path || linux_path[0] != '/')
 		return;
 	while (linux_path[n] && n < PATH_SIZE)
@@ -128,6 +133,7 @@ void fileid_cache_note(unsigned long long dev, unsigned long long ino, const cha
 
 int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linux_path, unsigned long size)
 {
+	dev = mounts_volume(dev);
 	struct slot* s = slot_for(dev, ino);
 	int found = 0;
 
@@ -152,7 +158,7 @@ int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linu
 	struct linux_stat st;
 	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, linux_path, &st, LINUX_AT_SYMLINK_NOFOLLOW) < 0)
 		return 0;
-	return (unsigned int) st.st_dev == dev && st.st_ino == ino;
+	return mounts_volume(st.st_dev) == dev && st.st_ino == ino;
 }
 
 void fileid_cache_atfork_child(void)

@@ -7,12 +7,19 @@
 // /proc/self/mountinfo) names the mount point, as a path the process sees (under the prefix, or /Volumes/SystemRoot
 // outside it); and the file system's ID is the device the object is on, as ATTR_CMN_FSID and ATTR_CMN_DEVID report it.
 
+// The volume a Linux device is: its low 32 bits, the first word of the volume's fsid_t and ATTR_CMN_DEVID. Devices are
+// kept and compared only as this.
+static inline unsigned int mounts_volume(unsigned long long dev)
+{
+	return (unsigned int) dev;
+}
+
 // A volume's ID, fsid_t (statfs()'s f_fsid, ATTR_CMN_FSID): the device the object is on, as 32 bits, then the ID of
 // the Linux mount it's on, as a hint of which of the device's mounts (binds of one file system share a device). XNU's
 // fsgetpath() reads only the first word; Darling's searches the hinted mount first (impl/misc/fsgetpath.c).
 static inline unsigned long long mounts_fsid(unsigned long long dev, unsigned long long mount_id)
 {
-	return (unsigned int) dev | ((unsigned long long) (unsigned int) mount_id << 32);
+	return mounts_volume(dev) | ((unsigned long long) (unsigned int) mount_id << 32);
 }
 
 // the file system the object open as fd is on; as XNU, EBADF for no such descriptor and EINVAL for one that isn't a
