@@ -5,6 +5,7 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
+#include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/signal/duct_signals.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
@@ -25,7 +26,6 @@
 #include <darlingserver/rpc.h>
 
 extern _libkernel_functions_t _libkernel_functions;
-extern int _mach_fork_parent(void);
 extern void kqueue_atfork(void);
 
 libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
@@ -37,6 +37,29 @@ libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
 // so its own forks don't stop, and exec drops it.
 VISIBLE int __darling_fork_stop_child;
 #endif
+
+// clone() also returns a pidfd for the child (Linux 5.2)
+#define LINUX_CLONE_PIDFD 0x00001000
+
+// In the parent: returns once darlingserver has registered the child, whose task then has the special ports
+// this process had when it forked; the caller may change them as soon as fork() returns (launchd resets its
+// bootstrap port). The wait is for this child: `pidfd` (or -1) tells it from an earlier process with its PID,
+// and shows it dying before it checks in. The caller closes it.
+static void wait_for_child_checkin(int child, int pidfd)
+{
+	int result;
+
+	do
+		result = dserver_rpc_fork_wait_for_child(child, pidfd);
+	while (result == -LINUX_EINTR);
+
+	// -ESRCH: the child died before it checked in
+	if (result < 0 && result != -LINUX_ESRCH)
+	{
+		__simple_printf("fork: waiting for the child's darlingserver checkin failed: %d\n", result);
+		__simple_abort();
+	}
+}
 
 long sys_fork(void)
 {
@@ -52,6 +75,7 @@ long sys_fork(void)
 long sys_fork_special_ports_locked(void)
 {
 	int ret;
+	int pidfd = -1;
 	int wdfd = get_perthread_wd();
 	unsigned long long signal_mask;
 
@@ -63,11 +87,23 @@ long sys_fork_special_ports_locked(void)
 	// mldr's fork handlers (which hold its socket table's lock) until after them.
 	signal_mask = signals_block_all();
 	__darling_fork_prepare();
+
+	// The pidfd comes from clone() itself: opened once it returns, it could miss a child that was already reaped,
+	// or refer to another process that got its PID. Without pidfds (Linux before 5.3, where mldr gives each
+	// process a lifetime pipe instead), darlingserver goes by the PID.
+	ret = -LINUX_ENOSYS;
+	if (__dserver_get_process_lifetime_pipe() == -1)
+		ret = LINUX_SYSCALL(__NR_clone, LINUX_CLONE_PIDFD | LINUX_SIGCHLD, 0, &pidfd, 0, 0);
+	// no descriptor for the pidfd: fork without one
+	if (ret == -LINUX_ENOSYS || ret == -LINUX_EMFILE || ret == -LINUX_ENFILE)
+	{
+		pidfd = -1;
 #ifdef SYS_fork
-	ret = LINUX_SYSCALL(__NR_fork);
+		ret = LINUX_SYSCALL(__NR_fork);
 #else
-	ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
+		ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
 #endif
+	}
 	if (ret != 0)
 	{
 		__darling_fork_parent();
@@ -143,13 +179,12 @@ long sys_fork_special_ports_locked(void)
 		// registered, on our own socket: a signal handler may run now
 		signals_restore(signal_mask);
 	}
-#ifndef VARIANT_DYLD
 	else if (ret > 0)
 	{
-		// wait for the child's darlingserver checkin
-		_mach_fork_parent();
+		wait_for_child_checkin(ret, pidfd);
+		if (pidfd >= 0)
+			LINUX_SYSCALL(__NR_close, pidfd);
 	}
-#endif
 
 	return ret;
 }
