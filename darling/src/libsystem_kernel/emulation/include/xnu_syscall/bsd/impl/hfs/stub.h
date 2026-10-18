@@ -3,7 +3,6 @@
 
 long sys_mkcomplex();
 
-long sys_statv();
 long sys_lstatv();
 long sys_fstatv();
 long sys_getdirentriesattr();

@@ -180,8 +180,8 @@ static long linux_fstatfs(int fd, struct bsd_statfs64* buf)
 
 	memset(buf, 0, sizeof(*buf));
 	statfs_linux_to_bsd64(&lbuf, buf);
-	// fsid_t: the device, then a file system type that is always 0
-	buf->f_fsid = (unsigned int) st.st_dev;
+	// fsid_t: the device; mounts_fstatfs() and list_mount() add the mount
+	buf->f_fsid = mounts_fsid(st.st_dev, 0);
 	buf->f_iosize = lbuf.f_bsize;
 	return 0;
 }
@@ -279,6 +279,8 @@ long mounts_fstatfs(int fd, struct bsd_statfs64* buf)
 	// (no STATX_MNT_ID), the first one of its device, for its type
 	if (linux_path_statx(fd, "", LINUX_AT_EMPTY_PATH, LINUX_STATX_MNT_ID, &sx) == 0)
 	{
+		if (sx.mask & LINUX_STATX_MNT_ID)
+			buf->f_fsid = mounts_fsid(buf->f_fsid, sx.mnt_id);
 		struct find_mount f = {
 			.id = sx.mnt_id,
 			.major = sx.dev_major,
@@ -339,6 +341,7 @@ static int list_mount(const struct mountinfo* m, void* ctx)
 		return 0;
 	if (l->buf)
 	{
+		l->buf[l->n].f_fsid = mounts_fsid(l->buf[l->n].f_fsid, m->id);
 		fill_names(m, &l->buf[l->n]);
 		set_local(&l->buf[l->n], m->type);
 	}
@@ -351,6 +354,62 @@ long mounts_list(struct bsd_statfs64* buf, long count)
 	struct list_mounts l = { .buf = buf, .count = count, .n = 0 };
 	long ret = each_mount(list_mount, &l);
 	return ret < 0 ? ret : l.n;
+}
+
+struct device_roots
+{
+	unsigned long long dev, id;
+	// 1: only the mount with ID id; -1: every other one
+	int only;
+	const char* type;
+	int (*each)(const char* linux_mount_point, void* ctx);
+	void* ctx;
+};
+
+static int device_root(const struct mountinfo* m, void* ctx)
+{
+	struct device_roots* d = ctx;
+	struct linux_stat st;
+	unsigned long long id;
+
+	// a directory whose device (or file system type) is the one asked for, and no other mount over it (as
+	// list_mount())
+	if (d->type && strcmp(m->type, d->type) != 0)
+		return 0;
+	if ((d->only > 0 && m->id != d->id) || (d->only < 0 && m->id == d->id))
+		return 0;
+	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, m->on, &st, 0) < 0 || (st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR ||
+		(!d->type && mounts_volume(st.st_dev) != d->dev))
+		return 0;
+	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, m->on, LINUX_O_PATH | LINUX_O_CLOEXEC, 0);
+	if (fd < 0)
+		return 0;
+	int covered = mounts_id(fd, "", LINUX_AT_EMPTY_PATH, &id) > 0 && id != m->id;
+	close_internal(fd);
+	return covered ? 0 : d->each(m->on, d->ctx);
+}
+
+long mounts_each_root(unsigned long long dev, int (*each)(const char* linux_mount_point, void* ctx), void* ctx)
+{
+	struct device_roots d = { .dev = dev, .each = each, .ctx = ctx };
+	return each_mount(device_root, &d);
+}
+
+long mounts_each_root_from(unsigned long long dev, unsigned long long first_id,
+	int (*each)(const char* linux_mount_point, void* ctx), void* ctx)
+{
+	struct device_roots d = { .dev = dev, .id = first_id, .only = 1, .each = each, .ctx = ctx };
+	long ret = first_id ? each_mount(device_root, &d) : 0;
+	if (ret)
+		return ret;
+	d.only = first_id ? -1 : 0;
+	return each_mount(device_root, &d);
+}
+
+long mounts_each_of_type(const char* type, int (*each)(const char* linux_mount_point, void* ctx), void* ctx)
+{
+	struct device_roots d = { .type = type, .each = each, .ctx = ctx };
+	return each_mount(device_root, &d);
 }
 
 long mounts_open_root(const struct bsd_statfs64* fs)

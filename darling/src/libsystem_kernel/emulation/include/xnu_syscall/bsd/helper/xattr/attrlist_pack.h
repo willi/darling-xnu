@@ -18,6 +18,7 @@
 #define ATTR_BIT_MAP_COUNT 5
 
 #define ATTR_CMN_NAME 0x00000001
+#define ATTR_CMN_FSID 0x00000004
 #define ATTR_CMN_ERROR 0x20000000
 #define ATTR_CMN_RETURNED_ATTRS 0x80000000
 
@@ -28,6 +29,7 @@
 #define FSOPT_REPORT_FULLSIZE 0x00000004
 #define FSOPT_PACK_INVAL_ATTRS 0x00000008
 #define FSOPT_ATTR_CMN_EXTENDED 0x00000020
+#define ATTR_CMNEXT_REALFSID 0x00000080
 
 // the most an object packs into: the fixed-size attributes (under 600 bytes), its name, and three paths of up to
 // MAXPATHLEN
@@ -45,6 +47,8 @@ struct attrlist_object
 	const char* name;
 	// as the process sees it, or NULL for no answer: ATTR_CMN_FULLPATH and the common extended paths
 	const char* fullpath;
+	// the Linux mount it's on, or 0 if not known: the second word of ATTR_CMN_FSID (mounts_fsid())
+	unsigned long long mount_id;
 };
 
 // 0 when XNU would accept the attributes asked of an object (a directory or not), else -EINVAL
@@ -58,6 +62,8 @@ struct attrlist_volume
 {
 	const struct bsd_statfs64* fs;
 	const char* name;
+	// whether fsgetpath() finds the volume's objects (VOL_CAP_FMT_PATH_FROM_ID)
+	int path_from_id;
 };
 
 // 0 when XNU would accept the volume attributes asked for, else -EINVAL

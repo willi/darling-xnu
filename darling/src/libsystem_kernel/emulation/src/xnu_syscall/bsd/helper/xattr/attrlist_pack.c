@@ -8,11 +8,11 @@
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
 #define ATTR_CMN_DEVID 0x00000002
-#define ATTR_CMN_FSID 0x00000004
 #define ATTR_CMN_OBJTYPE 0x00000008
 #define ATTR_CMN_OBJTAG 0x00000010
 #define ATTR_CMN_OBJID 0x00000020
@@ -64,7 +64,6 @@
 #define ATTR_CMNEXT_LINKID 0x00000010
 #define ATTR_CMNEXT_NOFIRMLINKPATH 0x00000020
 #define ATTR_CMNEXT_REALDEVID 0x00000040
-#define ATTR_CMNEXT_REALFSID 0x00000080
 #define ATTR_CMNEXT_CLONEID 0x00000100
 #define ATTR_CMNEXT_EXT_FLAGS 0x00000200
 #define ATTR_CMNEXT_RECURSIVE_GENCOUNT 0x00000400
@@ -106,6 +105,7 @@
 #define VOL_CAP_FMT_CASE_PRESERVING 0x00000200
 #define VOL_CAP_FMT_FAST_STATFS 0x00000400
 #define VOL_CAP_FMT_2TB_FILESIZE 0x00000800
+#define VOL_CAP_FMT_PATH_FROM_ID 0x00004000
 #define VOL_CAP_FMT_64BIT_OBJECT_IDS 0x00020000
 #define VOL_CAP_INT_ATTRLIST 0x00000002
 #define VOL_CAP_INT_ADVLOCK 0x00000100
@@ -332,9 +332,9 @@ static void pack_common(struct packer* p, uint32_t c, const struct attrlist_obje
 	if (c & ATTR_CMN_NAME)
 		put_ref(p, CMN, ATTR_CMN_NAME, obj->name);
 	if (c & ATTR_CMN_DEVID)
-		put32(p, CMN, ATTR_CMN_DEVID, (uint32_t) st->st_dev);
+		put32(p, CMN, ATTR_CMN_DEVID, mounts_volume(st->st_dev));
 	if (c & ATTR_CMN_FSID)
-		put64(p, CMN, ATTR_CMN_FSID, (uint32_t) st->st_dev);
+		put64(p, CMN, ATTR_CMN_FSID, mounts_fsid(st->st_dev, obj->mount_id));
 	if (c & ATTR_CMN_OBJTYPE)
 		put32(p, CMN, ATTR_CMN_OBJTYPE, objtype(st->st_mode));
 	if (c & ATTR_CMN_OBJTAG)
@@ -455,9 +455,9 @@ uint32_t attrlist_pack(const struct xnu_attrlist* al, uint64_t options, const st
 	if (x & ATTR_CMNEXT_NOFIRMLINKPATH)
 		put_ref(&p, EXT, ATTR_CMNEXT_NOFIRMLINKPATH, obj->fullpath);
 	if (x & ATTR_CMNEXT_REALDEVID)
-		put32(&p, EXT, ATTR_CMNEXT_REALDEVID, (uint32_t) st->st_dev);
+		put32(&p, EXT, ATTR_CMNEXT_REALDEVID, mounts_volume(st->st_dev));
 	if (x & ATTR_CMNEXT_REALFSID)
-		put64(&p, EXT, ATTR_CMNEXT_REALFSID, (uint32_t) st->st_dev);
+		put64(&p, EXT, ATTR_CMNEXT_REALFSID, mounts_fsid(st->st_dev, obj->mount_id));
 	if (x & ATTR_CMNEXT_CLONEID)
 		put_none(&p, sizeof(uint64_t));
 	if (x & ATTR_CMNEXT_EXT_FLAGS)
@@ -547,10 +547,13 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 		put64(&p, VOL, ATTR_VOL_ENCODINGSUSED, 0);
 	if (v & ATTR_VOL_CAPABILITIES)
 	{
+		// as fsgetpath() can find the volume's objects by ID (helper/misc/fileid.c). Without PATH_FROM_ID CFURL has no
+		// _kCFURLFileIDKey for the volume's files, and LaunchServices then registers an app without its executable, as
+		// a placeholder with no SDK version: SpringBoard runs it in a 375x667 compatibility mode.
 		uint32_t caps[8] = {
 			VOL_CAP_FMT_SYMBOLICLINKS | VOL_CAP_FMT_HARDLINKS | VOL_CAP_FMT_SPARSE_FILES | VOL_CAP_FMT_CASE_SENSITIVE |
 				VOL_CAP_FMT_CASE_PRESERVING | VOL_CAP_FMT_FAST_STATFS | VOL_CAP_FMT_2TB_FILESIZE |
-				VOL_CAP_FMT_64BIT_OBJECT_IDS,
+				(vol->path_from_id ? VOL_CAP_FMT_PATH_FROM_ID : 0) | VOL_CAP_FMT_64BIT_OBJECT_IDS,
 			VOL_CAP_INT_ATTRLIST | VOL_CAP_INT_ADVLOCK | VOL_CAP_INT_FLOCK | VOL_CAP_INT_EXTENDED_ATTR |
 				VOL_CAP_INT_RENAME_SWAP | VOL_CAP_INT_RENAME_EXCL,
 			0, 0, // reserved

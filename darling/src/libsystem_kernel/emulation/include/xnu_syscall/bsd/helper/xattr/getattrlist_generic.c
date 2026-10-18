@@ -13,6 +13,8 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fdpath.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid.h>
 
 // getattrlist(), fgetattrlist() and getattrlistat(): the attributes of an object, or of the volume it is on, packed as
 // attrlist_pack.h says.
@@ -47,7 +49,9 @@ struct object
 	struct attrlist_object obj;
 };
 
+#define ATTR_CMN_OBJID 0x00000020
 #define ATTR_CMN_PAROBJID 0x00000080
+#define ATTR_CMN_FILEID 0x02000000
 #define ATTR_CMN_FULLPATH 0x08000000
 #define ATTR_CMN_PARENTID 0x40000000
 #define ATTR_DIR_MOUNTSTATUS 0x00000004
@@ -65,6 +69,12 @@ static int needs_path(const struct xnu_attrlist* al, unsigned long options)
 {
 	return (al->commonattr & (ATTR_CMN_NAME | ATTR_CMN_FULLPATH)) ||
 		((options & FSOPT_ATTR_CMN_EXTENDED) && (al->forkattr & (ATTR_CMNEXT_RELPATH | ATTR_CMNEXT_NOFIRMLINKPATH)));
+}
+
+// the mount the object is on, for its fsid_t's second word
+static int needs_mount(const struct xnu_attrlist* al, unsigned long options)
+{
+	return (al->commonattr & ATTR_CMN_FSID) || ((options & FSOPT_ATTR_CMN_EXTENDED) && (al->forkattr & ATTR_CMNEXT_REALFSID));
 }
 
 static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrlist* al, unsigned long options,
@@ -124,16 +134,21 @@ static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrl
 
 	o->obj = (struct attrlist_object) { .st = st, .parent = &o->parent, .dirfd = LINUX_AT_FDCWD, .lookup = o->proc_path,
 		.name = o->name, .fullpath = fullpath };
+	if (needs_mount(al, options))
+		mounts_id(objfd, "", LINUX_AT_EMPTY_PATH, &o->obj.mount_id);
 	return 0;
 }
 
-static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out)
+// st: the object's Linux stat
+static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out,
+	struct linux_stat* st)
 {
 	struct object o;
 	long rv = describe(objfd, alist, options, &o);
 
 	if (rv < 0)
 		return rv;
+	*st = o.st;
 	rv = attrlist_check(alist, options, (o.st.st_mode & LINUX_S_IFMT) == LINUX_S_IFDIR);
 	if (rv < 0)
 		return rv;
@@ -168,7 +183,9 @@ static __attribute__((noinline)) long pack_volume(int objfd, const struct xnu_at
 	name = mounts_volume_name(&fs);
 	root.obj.name = name;
 
-	struct attrlist_volume vol = { .fs = &fs, .name = name };
+	// a few lookups: only for the capabilities that report it
+	struct attrlist_volume vol = { .fs = &fs, .name = name,
+		.path_from_id = (alist->volattr & ATTR_VOL_CAPABILITIES) && fileid_volume_searchable(objfd) };
 	return attrlist_pack_volume(alist, options, &root.obj, &vol, out);
 }
 
@@ -214,13 +231,19 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 #else
 		int objfd = fd;
 #endif
-		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, alist, options, out);
+		struct linux_stat st;
+		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, alist, options, out, &st);
 #if HAS_PATH
 		close_internal(objfd);
 #endif
 		if (rv < 0)
 			return rv;
 		size = rv;
+#if HAS_PATH
+		// an ID handed out by path, once it is: fsgetpath() can then answer it without a search
+		if (!alist->volattr && (alist->commonattr & (ATTR_CMN_OBJID | ATTR_CMN_FILEID)))
+			fileid_cache_note(st.st_dev, st.st_ino, vc.path);
+#endif
 	}
 
 	// as XNU: the length is of what was returned, or with FSOPT_REPORT_FULLSIZE of everything asked for (so the caller

@@ -12,11 +12,6 @@ long sys_mkcomplex()
 	return -ENOTSUP;
 }
 
-long sys_statv()
-{
-	return -ENOTSUP;
-}
-
 long sys_lstatv()
 {
 	return -ENOTSUP;

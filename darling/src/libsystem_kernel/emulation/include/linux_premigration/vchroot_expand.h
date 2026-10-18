@@ -24,7 +24,11 @@ struct vchroot_unexpand_args
 };
 
 int vchroot_expand(struct vchroot_expand_args* args);
+// the path a process sees for an expanded (Linux) one, in place: -LINUX_ENAMETOOLONG, the path left as it was, when it
+// doesn't fit (a path outside the prefix gets longer, under /Volumes/SystemRoot)
 int vchroot_unexpand(struct vchroot_unexpand_args* args);
+// the same, into out (size bytes; it may be linux_path itself)
+int vchroot_unexpand_into(const char* linux_path, char* out, unsigned long size);
 int vchroot_fdpath(struct vchroot_fdpath_args* args);
 // whether an expanded (Linux) path is the vchroot's root, the "/" the process sees
 int vchroot_is_root(const char* linux_path);

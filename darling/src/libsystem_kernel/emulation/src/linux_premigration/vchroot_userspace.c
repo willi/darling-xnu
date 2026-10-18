@@ -499,7 +499,9 @@ int vchroot_fdpath(struct vchroot_fdpath_args* args)
 
 	link[rv] = '\0';
 
-	if (rv >= prefix_path_len && strncmp(link, prefix_path, prefix_path_len) == 0)
+	// as vchroot_unexpand_into(): the prefix or a path under it, not a sibling that starts with its name
+	if (rv >= prefix_path_len && strncmp(link, prefix_path, prefix_path_len) == 0 &&
+		(link[prefix_path_len] == '\0' || link[prefix_path_len] == '/'))
 	{
 		if (args->maxlen-1 < rv - prefix_path_len)
 			return -LINUX_ENAMETOOLONG;
@@ -536,24 +538,41 @@ int vchroot_is_root(const char* linux_path)
 	return strcmp(linux_path, prefix_path) == 0;
 }
 
-int vchroot_unexpand(struct vchroot_unexpand_args* args)
+int vchroot_unexpand_into(const char* linux_path, char* out, unsigned long size)
 {
-	if (memcmp(args->path, prefix_path, prefix_path_len) == 0)
-	{
-		int bytes = strlen(args->path + prefix_path_len) + 1;
-		memmove(args->path, args->path + prefix_path_len, bytes);
+	unsigned long len = strlen(linux_path);
 
-		if (args->path[0] == '\0')
-			strcpy(args->path, "/");
+#ifndef TEST
+	// callers needn't have expanded a path first, which is what used to make the prefix known
+	if (prefix_path_len == -1)
+		init_vchroot_path();
+#endif
+	// the prefix, or a path under it: not a sibling that only starts with its name (/root/.darling.workdir/x)
+	if (strncmp(linux_path, prefix_path, prefix_path_len) == 0 &&
+		(linux_path[prefix_path_len] == '\0' || linux_path[prefix_path_len] == '/'))
+	{
+		unsigned long rest = len - prefix_path_len;
+		if ((rest ? rest : 1) + 1 > size)
+			return -LINUX_ENAMETOOLONG;
+		memmove(out, linux_path + prefix_path_len, rest + 1);
+		if (out[0] == '\0')
+			strcpy(out, "/");
 	}
 	else
 	{
-		int bytes = strlen(args->path) + 1;
-		memmove(args->path + sizeof(EXIT_PATH) - 1, args->path, bytes);
-		memcpy(args->path, EXIT_PATH, sizeof(EXIT_PATH) - 1);
+		// outside the prefix: under /Volumes/SystemRoot, which makes the path longer
+		if (sizeof(EXIT_PATH) - 1 + len + 1 > size)
+			return -LINUX_ENAMETOOLONG;
+		memmove(out + sizeof(EXIT_PATH) - 1, linux_path, len + 1);
+		memcpy(out, EXIT_PATH, sizeof(EXIT_PATH) - 1);
 	}
 
 	return 0;
+}
+
+int vchroot_unexpand(struct vchroot_unexpand_args* args)
+{
+	return vchroot_unexpand_into(args->path, args->path, sizeof(args->path));
 }
 
 #ifdef TEST
