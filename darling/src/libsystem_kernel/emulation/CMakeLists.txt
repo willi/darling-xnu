@@ -131,6 +131,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/network/sostate.c
 	src/xnu_syscall/bsd/helper/network/sockutil.c
 	src/xnu_syscall/bsd/helper/network/nosigpipe.c
+	src/xnu_syscall/bsd/helper/network/tcpinfo.c
 
 	src/xnu_syscall/bsd/impl/audit/audit_addr.c
 	src/xnu_syscall/bsd/impl/audit/audit_session_join.c

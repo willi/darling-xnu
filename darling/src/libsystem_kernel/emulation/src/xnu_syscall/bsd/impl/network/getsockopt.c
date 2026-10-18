@@ -12,6 +12,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/route.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/sostate.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/network/nosigpipe.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/network/tcpinfo.h>
 
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
 
@@ -80,6 +81,8 @@ long sys_getsockopt(int fd, int level, int optname, void* optval, int* optlen)
 		ret = socket_nosigpipe_get(fd, &on);
 		return ret < 0 ? ret : int_option(on, optval, optlen);
 	}
+	if (level == XNU_IPPROTO_TCP && (optname == BSD_TCP_INFO || optname == BSD_TCP_CONNECTION_INFO))
+		return tcp_info_option(fd, optname, optval, optlen);
 
 	linux_level = level;
 	linux_optname = optname;
