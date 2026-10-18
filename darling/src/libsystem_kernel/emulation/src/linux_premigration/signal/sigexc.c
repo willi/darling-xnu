@@ -63,12 +63,13 @@ static void float_state_to_mcontext(const x86_float_state32_t* s, linux_fpregset
 static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, const void* fstate);
 static void state_to_kernel(struct linux_ucontext* ctxt, void* tstate, void* fstate);
 
-#define DEBUG_SIGEXC
-#ifdef DEBUG_SIGEXC
-#define kern_printf(...) __simple_kprintf(__VA_ARGS__)
-#else
-#define kern_printf(...)
+// Each kern_printf is a darlingserver round trip, about 76 per signal when they're on: keep them off by default.
+// Build with -DDEBUG_SIGEXC=1 to debug this file; tests/signal_flood fails while they are on.
+#ifndef DEBUG_SIGEXC
+	#define DEBUG_SIGEXC 0
 #endif
+
+#define kern_printf(...) do { if (DEBUG_SIGEXC) __simple_kprintf(__VA_ARGS__); } while (0)
 
 void sigexc_setup1(void)
 {
@@ -168,7 +169,6 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 
 	kern_printf("sigexc: sigrt_handler SUSPEND\n");
 
-	thread_t thread = mach_thread_self();
 	state_to_kernel(ctxt, &tstate, &fstate);
 
 	int ret = dserver_rpc_thread_suspended(&tstate, &fstate);
@@ -179,7 +179,7 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 
 	state_from_kernel(ctxt, &tstate, &fstate);
 	} else if (signum == SIGNAL_S2C) {
-		__simple_kprintf("sigexc: sigrt_handler S2C");
+		kern_printf("sigexc: sigrt_handler S2C\n");
 
 		int ret = dserver_rpc_s2c_perform();
 		if (ret < 0) {
@@ -298,8 +298,6 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 #ifdef __x86_64__
 	kern_printf("sigexc: have RIP 0x%llx\n", ctxt->uc_mcontext.gregs.rip);
 #endif
-
-	thread_t thread = mach_thread_self();
 
 #if defined(__x86_64__)
 	x86_thread_state64_t tstate;
