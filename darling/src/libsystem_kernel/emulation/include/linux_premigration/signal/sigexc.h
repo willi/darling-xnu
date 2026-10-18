@@ -17,7 +17,8 @@ void sigexc_setup(void);
 void darling_sigexc_self(void);
 void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt);
 
-void sigexc_thread_setup(void);
-void sigexc_thread_exit(void);
+// the hooks mldr calls on a thread it starts (elfcalls.h: signal_stack_setup, signal_stack_teardown)
+int sigexc_thread_setup(void** stack);
+void sigexc_thread_teardown(void* stack);
 
 #endif // _SIGEXC_H

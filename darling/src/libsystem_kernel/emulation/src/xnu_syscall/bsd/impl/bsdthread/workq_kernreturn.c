@@ -87,24 +87,6 @@ static void list_remove(struct parked_thread* head, struct parked_thread* item);
 
 static int priority_to_class(int prio);
 
-static void rpc_guard(int fd) {
-	guard_entry_options_t options;
-	options.close = __dserver_close_socket;
-	guard_table_add(fd, guard_flag_prevent_close | guard_flag_close_on_fork, &options);
-};
-
-static void rpc_unguard(int fd) {
-	guard_table_remove(fd);
-};
-
-static const struct darling_thread_create_callbacks callbacks = {
-	.thread_self_trap = &thread_self_trap_impl,
-	.thread_set_tsd_base = &sys_thread_set_tsd_base,
-	.rpc_guard = rpc_guard,
-	.rpc_unguard = rpc_unguard,
-	.signal_stack_setup = sigexc_thread_setup,
-};
-
 static int extract_wq_flags(int priority) {
 	int flags = 0;
 	int qos = _pthread_priority_thread_qos(priority);
@@ -183,7 +165,7 @@ void workq_thread_request(workq_prepare_f prepare, void* context)
 	request->context = context;
 
 	if (__darling_thread_create(512*1024, pthread_obj_size, workq_requested_thread_start, 0, (uintptr_t) request,
-			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0, &callbacks, NULL) == NULL)
+			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0, &darling_thread_callbacks, NULL) == NULL)
 	{
 		// lost, as a REQTHREADS request below is
 		__simple_printf("workq: couldn't start a thread for a request\n");
@@ -338,7 +320,7 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 
 				// __simple_printf("Spawning a new thread\n");
 				if (__darling_thread_create(512*1024, pthread_obj_size, wqueue_entry_point_wrapper, 0,
-						NULL, flags, 0, &callbacks, NULL) == NULL)
+						NULL, flags, 0, &darling_thread_callbacks, NULL) == NULL)
 				{
 					// XNU keeps such a request queued and retries (workq_schedule_delayed_thread_creation() in
 					// bsd/pthread/pthread_workqueue.c); here it's lost, but its running-thread slot comes back

@@ -17,6 +17,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/common/guarded/table.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/bsdthread_create.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
@@ -144,13 +145,12 @@ long sys_fork_special_ports_locked(void)
 		int newReadFd = __dserver_process_lifetime_pipe_refresh();
 
 		// guard it
-		guard_entry_options_t options;
-		options.close = __dserver_close_socket;
-		guard_table_add(__dserver_per_thread_socket(), guard_flag_prevent_close | guard_flag_close_on_fork, &options);
+		dserver_rpc_socket_guard(__dserver_per_thread_socket());
 
 		// only guard the lifetime pipe if it's used.
 		if (newReadFd != -1)
 		{
+			guard_entry_options_t options;
 			options.close = __dserver_close_process_lifetime_pipe;
 			guard_table_add(__dserver_get_process_lifetime_pipe(), guard_flag_prevent_close | guard_flag_close_on_fork, &options);
 		}
