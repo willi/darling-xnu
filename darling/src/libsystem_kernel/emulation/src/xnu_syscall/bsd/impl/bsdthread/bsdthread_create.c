@@ -15,6 +15,7 @@
 #include <darling/emulation/xnu_syscall/mach/impl/mach_traps.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/linux_premigration/signal/sigexc.h>
 
 #include <darlingserver/rpc.h>
 
@@ -48,6 +49,7 @@ static const struct darling_thread_create_callbacks callbacks = {
 	.thread_set_tsd_base = &sys_thread_set_tsd_base,
 	.rpc_guard = rpc_guard,
 	.rpc_unguard = rpc_unguard,
+	.signal_stack_setup = sigexc_thread_setup,
 };
 
 long sys_bsdthread_create(void* thread_start, void* arg,

@@ -102,6 +102,7 @@ static const struct darling_thread_create_callbacks callbacks = {
 	.thread_set_tsd_base = &sys_thread_set_tsd_base,
 	.rpc_guard = rpc_guard,
 	.rpc_unguard = rpc_unguard,
+	.signal_stack_setup = sigexc_thread_setup,
 };
 
 static int extract_wq_flags(int priority) {
@@ -142,7 +143,6 @@ static void workq_requested_thread_start(void* self, int thread_port, void* stac
 	struct workq_batch batch;
 
 	free(item);
-	sigexc_thread_setup();
 
 	// with nothing to do, the thread enters _start_wqthread just to terminate
 	if (!request.prepare(request.context, &batch))
