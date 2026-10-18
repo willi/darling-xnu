@@ -11,6 +11,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaltstack.h>
 #include <darling/emulation/other/mach/lkm.h>
+#include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
@@ -149,8 +150,65 @@ void sigexc_setup(void)
 #endif
 }
 
+// Both handlers talk to darlingserver first, on the thread's own RPC socket, as the thread it registered at its
+// checkin. So no thread runs them before its checkin or after its checkout, which these keep:
+// - a fork child: sys_fork() blocks every signal until the child has checked in (fork.c);
+// - a new thread: mldr's __darling_thread_create and darling_thread_entry (mldr/elfcalls/threads.c);
+// - a thread's end: mldr's __darling_thread_terminate blocks the app's signals before its checkout, the rest after
+//   (darlingserver's own two can still arrive while the checkout is in flight, and their handler's calls then come
+//   after it: a known gap);
+// - exec and a process's start: by construction, as libsystem_kernel installs these handlers (__libkernel_init) after
+//   mldr has checked in;
+// - a thread Darling didn't start: on_host_thread() below.
+// darlingserver logs a thread whose first call isn't its checkin.
+
+// A thread that a host library started with glibc's pthread_create (a Vulkan driver's worker, glibc's SIGEV_THREAD
+// helper) never checks in, and has its creator's signal mask: Linux gives it signals sent to the process. Without a
+// socket, the handlers' first call would end the process (mldr's __darling_thread_rpc_socket). Answers whether this is
+// such a thread, after dealing with the signal:
+// - one sent to the process goes back to it, siginfo and all, for a Darwin thread to take; this thread blocks it from
+//   now on (Linux picks a thread that doesn't block it). A signal sent to this very thread goes to the process too:
+//   no Darwin code knows the thread to send it one;
+// - a fault can't be taken elsewhere. Linux's default action ends the process, as in a Linux program: the faulting
+//   instruction runs again once the handler is gone.
+static bool on_host_thread(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
+{
+	if (__dserver_thread_has_socket())
+		return false;
+
+	int pid = LINUX_SYSCALL0(__NR_getpid);
+	bool fault = info->si_code > 0 && (linux_signum == LINUX_SIGSEGV || linux_signum == LINUX_SIGBUS
+		|| linux_signum == LINUX_SIGILL || linux_signum == LINUX_SIGFPE || linux_signum == LINUX_SIGTRAP
+		|| linux_signum == LINUX_SIGSYS);
+
+	if (fault)
+	{
+		__simple_fprintf(2, "sigexc: signal %d, a fault, on thread %d, which Darling didn't start: Linux's default "
+			"action\n", linux_signum, (int) LINUX_SYSCALL0(__NR_gettid));
+
+		struct linux_sigaction sa;
+		sa.sa_sigaction = (linux_sig_handler*) NULL; // SIG_DFL
+		sa.sa_mask = 0;
+		sa.sa_flags = LINUX_SA_RESTORER;
+		sa.sa_restorer = sig_restorer;
+		LINUX_SYSCALL(__NR_rt_sigaction, linux_signum, &sa, NULL, sizeof(sa.sa_mask));
+		return true;
+	}
+
+	ctxt->uc_sigmask |= 1ull << (linux_signum - 1);
+	// Linux accepts any siginfo sent to the sender's own process; a full queue (EAGAIN) is for real-time signals only
+	if (LINUX_SYSCALL(__NR_rt_sigqueueinfo, pid, linux_signum, info) < 0)
+		LINUX_SYSCALL(__NR_kill, pid, linux_signum);
+	return true;
+}
+
 void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
+	// darlingserver sends its two to a thread it knows; one that came here was for a thread gone, whose TID Linux has
+	// given this one
+	if (!__dserver_thread_has_socket())
+		return;
+
 	int status = dserver_rpc_interrupt_enter();
 
 	if (status != 0) {
@@ -269,8 +327,12 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
 #endif
 }
 
+// see sigrt_handler on when it may run
 void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
+	if (on_host_thread(linux_signum, info, ctxt))
+		return;
+
 	int status = dserver_rpc_interrupt_enter();
 
 	if (status != 0) {
@@ -590,33 +652,56 @@ void float_state_to_mcontext(const x86_float_state32_t* s, linux_fpregset_t fx)
 }
 #endif
 
-void sigexc_thread_setup(void)
-{
-	struct bsd_stack newstack = {
-		.ss_size = default_sigaltstack_size,
-		.ss_flags = 0
-	};
-
+// A thread's alternate signal stack: its handlers run there (LINUX_SA_ONSTACK), with a guard page below it.
 #if SIGALTSTACK_GUARD
-	newstack.ss_sp = (void*) sys_mmap(NULL, newstack.ss_size + 4096, PROT_READ | PROT_WRITE,
-			MAP_ANON | MAP_PRIVATE, -1, 0);
-	sys_mprotect(newstack.ss_sp, 4096, PROT_NONE);
-	newstack.ss_sp = (char*)newstack.ss_sp + 4096;
+	#define SIGEXC_STACK_GUARD 4096
 #else
-	newstack.ss_sp = (void*) sys_mmap(NULL, newstack.ss_size, PROT_READ | PROT_WRITE,
-			MAP_ANON | MAP_PRIVATE, -1, 0);
+	#define SIGEXC_STACK_GUARD 0
 #endif
-	sys_sigaltstack(&newstack, NULL);
+
+int sigexc_thread_setup(void** stack)
+{
+	unsigned long size = default_sigaltstack_size + SIGEXC_STACK_GUARD;
+	void* mapping = sys_mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+
+	// a failed mapping is a negative errno, which sigaltstack() took as the stack
+	if ((intptr_t) mapping < 0 && (intptr_t) mapping >= -4095)
+		return (int) (intptr_t) mapping;
+
+	if (SIGEXC_STACK_GUARD != 0)
+		sys_mprotect(mapping, SIGEXC_STACK_GUARD, PROT_NONE);
+
+	struct bsd_stack newstack = {
+		.ss_sp = (char*) mapping + SIGEXC_STACK_GUARD,
+		.ss_size = default_sigaltstack_size,
+		.ss_flags = 0,
+	};
+	int err = sys_sigaltstack(&newstack, NULL);
+	if (err < 0)
+	{
+		sys_munmap(mapping, size);
+		return err;
+	}
+
+	*stack = mapping;
+	return 0;
 }
 
-void sigexc_thread_exit(void)
+// The thread is ending, with every signal blocked. The app may have given it a stack of its own since; that one is
+// the app's to free.
+void sigexc_thread_teardown(void* stack)
 {
-	struct bsd_stack oldstack;
-	sys_sigaltstack(NULL, &oldstack);
+	struct bsd_stack current;
+	unsigned long size = default_sigaltstack_size + SIGEXC_STACK_GUARD;
 
-#if SIGALTSTACK_GUARD
-	sys_munmap((char*)oldstack.ss_sp - 4096, oldstack.ss_size + 4096);
-#else
-	sys_munmap(oldstack.ss_sp, oldstack.ss_size);
-#endif
+	if (stack == NULL)
+		return;
+
+	if (sys_sigaltstack(NULL, &current) == 0 && current.ss_sp == (char*) stack + SIGEXC_STACK_GUARD)
+	{
+		// Linux's SS_DISABLE, which sys_sigaltstack() would pass on as it is (XNU's is 4)
+		struct linux_stack none = { .ss_flags = 2 };
+		LINUX_SYSCALL(__NR_sigaltstack, &none, NULL);
+	}
+	sys_munmap(stack, size);
 }

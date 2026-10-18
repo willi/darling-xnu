@@ -6,7 +6,6 @@
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
-#include <darling/emulation/linux_premigration/signal/sigexc.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/common/simple.h>
 
@@ -91,8 +90,6 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 void pthread_entry_point_wrapper(void* self, int thread_port, void* funptr,
 		void* funarg, unsigned long stack_addr, unsigned int flags)
 {
-	sigexc_thread_setup();
-
 	uintptr_t pthread_handle = (unsigned long) self;
 	uintptr_t dispatch_qaddr = pthread_handle + g_pth_regdata.tsd_offset + g_pth_regdata.dispatch_queue_offset;
 	if (dserver_rpc_set_thread_handles(pthread_handle, dispatch_qaddr) < 0) {
@@ -154,7 +151,6 @@ void pthread_entry_point_wrapper(void* self, int thread_port, void* funptr,
 void wqueue_entry_point_wrapper(void* self, int thread_port, void* stackaddr,
 		void* item, int reuse, int nevents)
 {
-	sigexc_thread_setup();
 	wqueue_entry_point_asm_jump(self, thread_port, stackaddr, item, reuse, nevents);
 }
 
