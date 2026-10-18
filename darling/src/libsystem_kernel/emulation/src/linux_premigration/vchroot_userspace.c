@@ -499,7 +499,9 @@ int vchroot_fdpath(struct vchroot_fdpath_args* args)
 
 	link[rv] = '\0';
 
-	if (rv >= prefix_path_len && strncmp(link, prefix_path, prefix_path_len) == 0)
+	// as vchroot_unexpand_into(): the prefix or a path under it, not a sibling that starts with its name
+	if (rv >= prefix_path_len && strncmp(link, prefix_path, prefix_path_len) == 0 &&
+		(link[prefix_path_len] == '\0' || link[prefix_path_len] == '/'))
 	{
 		if (args->maxlen-1 < rv - prefix_path_len)
 			return -LINUX_ENAMETOOLONG;
@@ -540,7 +542,14 @@ int vchroot_unexpand_into(const char* linux_path, char* out, unsigned long size)
 {
 	unsigned long len = strlen(linux_path);
 
-	if (memcmp(linux_path, prefix_path, prefix_path_len) == 0)
+#ifndef TEST
+	// callers needn't have expanded a path first, which is what used to make the prefix known
+	if (prefix_path_len == -1)
+		init_vchroot_path();
+#endif
+	// the prefix, or a path under it: not a sibling that only starts with its name (/root/.darling.workdir/x)
+	if (strncmp(linux_path, prefix_path, prefix_path_len) == 0 &&
+		(linux_path[prefix_path_len] == '\0' || linux_path[prefix_path_len] == '/'))
 	{
 		unsigned long rest = len - prefix_path_len;
 		if ((rest ? rest : 1) + 1 > size)

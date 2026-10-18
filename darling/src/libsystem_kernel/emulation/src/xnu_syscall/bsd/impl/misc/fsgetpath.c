@@ -417,7 +417,6 @@ long sys_fsgetpath_ext(char* buf, unsigned long size, void* fsid, unsigned long 
 	if (ret == 0)
 	{
 		// the path as the process sees it: under the prefix, or /Volumes/SystemRoot outside it
-		vchroot_is_root(s->path); // vchroot_unexpand() needs the prefix, which this makes known
 		if (vchroot_unexpand_into(s->path, s->seen, sizeof(s->seen)) < 0)
 			ret = -ENOSPC;
 	}
