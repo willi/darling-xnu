@@ -8,11 +8,11 @@
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/linux_path.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/xattr_names.h>
 
 #define ATTR_CMN_DEVID 0x00000002
-#define ATTR_CMN_FSID 0x00000004
 #define ATTR_CMN_OBJTYPE 0x00000008
 #define ATTR_CMN_OBJTAG 0x00000010
 #define ATTR_CMN_OBJID 0x00000020
@@ -64,7 +64,6 @@
 #define ATTR_CMNEXT_LINKID 0x00000010
 #define ATTR_CMNEXT_NOFIRMLINKPATH 0x00000020
 #define ATTR_CMNEXT_REALDEVID 0x00000040
-#define ATTR_CMNEXT_REALFSID 0x00000080
 #define ATTR_CMNEXT_CLONEID 0x00000100
 #define ATTR_CMNEXT_EXT_FLAGS 0x00000200
 #define ATTR_CMNEXT_RECURSIVE_GENCOUNT 0x00000400
@@ -335,7 +334,7 @@ static void pack_common(struct packer* p, uint32_t c, const struct attrlist_obje
 	if (c & ATTR_CMN_DEVID)
 		put32(p, CMN, ATTR_CMN_DEVID, (uint32_t) st->st_dev);
 	if (c & ATTR_CMN_FSID)
-		put64(p, CMN, ATTR_CMN_FSID, (uint32_t) st->st_dev);
+		put64(p, CMN, ATTR_CMN_FSID, mounts_fsid(st->st_dev, obj->mount_id));
 	if (c & ATTR_CMN_OBJTYPE)
 		put32(p, CMN, ATTR_CMN_OBJTYPE, objtype(st->st_mode));
 	if (c & ATTR_CMN_OBJTAG)
@@ -458,7 +457,7 @@ uint32_t attrlist_pack(const struct xnu_attrlist* al, uint64_t options, const st
 	if (x & ATTR_CMNEXT_REALDEVID)
 		put32(&p, EXT, ATTR_CMNEXT_REALDEVID, (uint32_t) st->st_dev);
 	if (x & ATTR_CMNEXT_REALFSID)
-		put64(&p, EXT, ATTR_CMNEXT_REALFSID, (uint32_t) st->st_dev);
+		put64(&p, EXT, ATTR_CMNEXT_REALFSID, mounts_fsid(st->st_dev, obj->mount_id));
 	if (x & ATTR_CMNEXT_CLONEID)
 		put_none(&p, sizeof(uint64_t));
 	if (x & ATTR_CMNEXT_EXT_FLAGS)

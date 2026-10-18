@@ -9,6 +9,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
 
 // getattrlistbulk(): the entries of a directory with the attributes of each, as XNU packs them. MobileInstallation's
@@ -30,8 +31,8 @@ extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
 extern void* memset(void* s, int c, __SIZE_TYPE__ n);
 
 // one entry into out (ATTRLIST_PACK_MAX bytes); returns its size, or 0 to leave the entry out
-static uint32_t pack_entry(int dirfd, const struct linux_stat* dir_st, const char* name, const struct xnu_attrlist* al,
-	uint64_t options, char* out)
+static uint32_t pack_entry(int dirfd, const struct linux_stat* dir_st, unsigned long long mount_id, const char* name,
+	const struct xnu_attrlist* al, uint64_t options, char* out)
 {
 	struct linux_stat st;
 	uint32_t size;
@@ -47,7 +48,9 @@ static uint32_t pack_entry(int dirfd, const struct linux_stat* dir_st, const cha
 	else
 	{
 		struct attrlist_object obj = {
-			.st = &st, .parent = dir_st, .dirfd = dirfd, .lookup = name, .name = name, .fullpath = 0
+			.st = &st, .parent = dir_st, .dirfd = dirfd, .lookup = name, .name = name, .fullpath = 0,
+			// the directory's: an entry another file system is mounted on is on another, but this is only a hint
+			.mount_id = mount_id
 		};
 		size = attrlist_pack(al, options, &obj, out);
 	}
@@ -85,6 +88,10 @@ long sys_getattrlistbulk(int dirfd, struct xnu_attrlist* alist, void* attributeB
 	if ((dir_st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR)
 		return -ENOTDIR;
 
+	unsigned long long mount_id = 0;
+	if ((alist->commonattr & ATTR_CMN_FSID) || (alist->forkattr & ATTR_CMNEXT_REALFSID))
+		mounts_id(dirfd, "", LINUX_AT_EMPTY_PATH, &mount_id);
+
 	resume = LINUX_SYSCALL(__NR_lseek, dirfd, 0, LINUX_SEEK_CUR);
 	if (resume < 0)
 		return errno_linux_to_bsd(resume);
@@ -103,7 +110,7 @@ long sys_getattrlistbulk(int dirfd, struct xnu_attrlist* alist, void* attributeB
 			uint32_t size = 0;
 
 			if (!(d->d_name[0] == '.' && (d->d_name[1] == 0 || (d->d_name[1] == '.' && d->d_name[2] == 0))))
-				size = pack_entry(dirfd, &dir_st, d->d_name, alist, options, entry);
+				size = pack_entry(dirfd, &dir_st, mount_id, d->d_name, alist, options, entry);
 			if (size > bufferSize - used)
 			{
 				// the rest are for the next call: the directory's offset goes back to the first of them

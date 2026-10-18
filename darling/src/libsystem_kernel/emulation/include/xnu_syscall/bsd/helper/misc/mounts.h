@@ -7,6 +7,14 @@
 // /proc/self/mountinfo) names the mount point, as a path the process sees (under the prefix, or /Volumes/SystemRoot
 // outside it); and the file system's ID is the device the object is on, as ATTR_CMN_FSID and ATTR_CMN_DEVID report it.
 
+// A volume's ID, fsid_t (statfs()'s f_fsid, ATTR_CMN_FSID): the device the object is on, as 32 bits, then the ID of
+// the Linux mount it's on, as a hint of which of the device's mounts (binds of one file system share a device). XNU's
+// fsgetpath() reads only the first word; Darling's searches the hinted mount first (impl/misc/fsgetpath.c).
+static inline unsigned long long mounts_fsid(unsigned long long dev, unsigned long long mount_id)
+{
+	return (unsigned int) dev | ((unsigned long long) (unsigned int) mount_id << 32);
+}
+
 // the file system the object open as fd is on; as XNU, EBADF for no such descriptor and EINVAL for one that isn't a
 // file (a pipe, a socket)
 long mounts_fstatfs(int fd, struct bsd_statfs64* buf);
@@ -23,6 +31,10 @@ long mounts_open_root(const struct bsd_statfs64* fs);
 // calls each() with the mount point (a Linux path) of every mount whose root directory is on device dev (as the 32 bits
 // statfs()'s f_fsid has) and that no other mount covers, until it returns nonzero (which is returned); 0 when none did, or a negative XNU errno
 long mounts_each_root(unsigned long long dev, int (*each)(const char* linux_mount_point, void* ctx), void* ctx);
+
+// the same, the mount with Linux mount ID first_id first (0: none)
+long mounts_each_root_from(unsigned long long dev, unsigned long long first_id,
+	int (*each)(const char* linux_mount_point, void* ctx), void* ctx);
 
 // the same, for the mounts of file systems of a type (as mountinfo names it: "btrfs")
 long mounts_each_of_type(const char* type, int (*each)(const char* linux_mount_point, void* ctx), void* ctx);
