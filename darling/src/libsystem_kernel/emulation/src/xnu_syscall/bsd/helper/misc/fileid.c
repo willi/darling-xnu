@@ -29,6 +29,14 @@
 //   (kprintf, "fileid: searched"), with what it took.
 // What wasn't there is remembered for a while (fileid_cache_absent()).
 //
+// The errors are XNU's where Linux can tell them apart. An object too deep to give (its path longer than the buffer)
+// is ENOSPC, as XNU's build_path(). An object the search can't reach is ENOENT, though XNU would say otherwise:
+// - under a directory it passes over, because the path is too long to open or it is DEPTH_MAX deep, or the process
+//   is out of descriptors;
+// - under a directory the caller can't read. XNU's build_path(BUILDPATH_CHECKACCESS) needs only search permission
+//   and answers EACCES without it, but a search must list each directory, which takes read permission.
+// A process running as root (taffy's devices, for now) meets only the first.
+//
 // Binds of one file system into the process's mount namespace are one volume (one device): a search starts at the
 // mount the ID's hint names, then the others, in mountinfo's order. A bind's own objects are found in it as long as
 // binds of one file system don't overlap: otherwise another process may be given the other bind's path to an object
