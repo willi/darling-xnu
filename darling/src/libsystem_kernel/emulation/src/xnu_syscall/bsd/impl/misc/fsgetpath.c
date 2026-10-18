@@ -19,9 +19,10 @@
 // fsgetpath() and fsgetpath_ext(): the path of a file system object, by its volume's ID (statfs()'s f_fsid, ATTR_CMN_FSID:
 // the device it is on, under Darling) and its object ID (ATTR_CMN_FILEID, st_ino). Their arguments, errors and result
 // follow XNU's fsgetpath_extended() and fsgetpath_internal() (apple-oss-distributions/xnu, bsd/vfs/vfs_syscalls.c):
-// options other than FSOPT_NOFIRMLINKPATH and FSOPT_ISREALFSID are EINVAL; then a buffer of 0 or more than a page is
-// EINVAL; an ID no volume has is ENOTSUP; an object the volume doesn't have is ENOENT; a path that doesn't fit the buffer
-// is ENOSPC (build_path(), bsd/vfs/vfs_cache.c); and the result is the path's length counting its terminating NUL.
+// options other than FSOPT_NOFIRMLINKPATH and FSOPT_ISREALFSID are EINVAL; then a buffer of 0 or more than
+// MAXLONGPATHLEN (8192 since xnu-10063, macOS 14; a page before) is EINVAL; an ID no volume has is ENOTSUP; an object
+// the volume doesn't have is ENOENT; a path that doesn't fit the buffer is ENOSPC (build_path(), bsd/vfs/vfs_cache.c);
+// and the result is the path's length counting its terminating NUL.
 // Object ID 2 is the volume's root, as XNU's VFS_ROOT().
 //
 // Linux can't open a file by its inode number (open_by_handle_at() needs a file system's own handle, and
@@ -36,7 +37,9 @@
 #	define __NR_fstatat64 __NR_newfstatat
 #endif
 
-#define XNU_PAGE_SIZE 4096
+// sys/syslimits.h, as xnu-12377's fsgetpath_extended() checks it. Darling's own paths are shorter (VCHROOT_PATH_MAX
+// as Linux has them, 19 bytes more outside the prefix): a longer one is ENOSPC.
+#define XNU_MAXLONGPATHLEN 8192
 #define FSOPT_NOFIRMLINKPATH 0x00000080
 #define FSOPT_ISREALFSID 0x00000200
 #define ROOT_OBJID 2
@@ -194,7 +197,7 @@ long sys_fsgetpath_ext(char* buf, unsigned long size, void* fsid, unsigned long 
 		return -EFAULT;
 	// fsid_t's first word is the volume (XNU's volfs ID): under Darling, the device as a 32-bit number
 	unsigned long long dev = ((const uint32_t*) fsid)[0];
-	if (size == 0 || size > XNU_PAGE_SIZE)
+	if (size == 0 || size > XNU_MAXLONGPATHLEN)
 		return -EINVAL;
 
 	// the search's state is more than a thread's stack should hold
