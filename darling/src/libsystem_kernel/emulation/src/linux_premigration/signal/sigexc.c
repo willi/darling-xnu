@@ -179,7 +179,7 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 
 	state_from_kernel(ctxt, &tstate, &fstate);
 	} else if (signum == SIGNAL_S2C) {
-		__simple_kprintf("sigexc: sigrt_handler S2C");
+		kern_printf("sigexc: sigrt_handler S2C\n");
 
 		int ret = dserver_rpc_s2c_perform();
 		if (ret < 0) {
