@@ -4,27 +4,35 @@
 #include <libsimple/lock.h>
 
 #include <darling/emulation/conversion/errno.h>
-#include <darling/emulation/conversion/fcntl/open.h>
+#include <darling/emulation/conversion/common_at.h>
+#include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
-#include <darling/emulation/common/simple.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
-#include <darling/emulation/other/mach/lkm.h>
-#include <darling/emulation/conversion/duct_errno.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/unistd/access.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
+
+// CarbonCore's FSRef: an object by its volume and object ID, as an FSRef is on macOS, resolved to a path with
+// fileid_find() (fsgetpath()'s lookup), in any process. The process that made a reference also keeps the path it was
+// made from, which answers first while it still names the object: it also finds objects fileid_find() can't (a file of
+// Darling's prefix overlay, whose device no mount is of), and the references a process holds outlast the fileid cache's
+// entries, one per hash.
+
+#ifndef __NR_fstatat64
+#	define __NR_fstatat64 __NR_newfstatat
+#endif
 
 extern void free(void* ptr);
+extern char* strdup(const char* s);
 
 struct SavedRef
 {
-	char* path;
+	char* path; // a Linux path
 	int gen;
 };
 
-#define MOUNT_ID_SAVED (-100)
 static struct SavedRef g_savedRefs[200];
 static int g_nextSavedRef = 0, g_nextGen = 0;
 static libsimple_lock_t g_savedRefLock = LIBSIMPLE_LOCK_INITIALIZER;
@@ -33,6 +41,7 @@ VISIBLE
 int sys_name_to_handle(const char* name, RefData* ref, int follow)
 {
 	int ret;
+	struct linux_stat st;
 
 	struct vchroot_expand_args vc;
 	vc.flags = follow ? VCHROOT_FOLLOW : 0;
@@ -43,193 +52,74 @@ int sys_name_to_handle(const char* name, RefData* ref, int follow)
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
 
-	ref->fh.handle_bytes = sizeof(RefData) - offsetof(RefData, fh.f_handle);
-
-	ret = LINUX_SYSCALL(__NR_name_to_handle_at, LINUX_AT_FDCWD, vc.path, &ref->fh, &ref->mount_id, 0);
-
-	// This is unfortunately the case for overlayfs, which doesn't support "nfs_export" along with "metacopy"
-	if (ret == -LINUX_EOPNOTSUPP && sys_access(name, 0) == 0)
-	{
-		libsimple_lock_lock(&g_savedRefLock);
-
-		if (g_savedRefs[g_nextSavedRef].path)
-			free(g_savedRefs[g_nextSavedRef].path);
-
-		ref->gen = g_nextGen++;
-		g_savedRefs[g_nextSavedRef].path = strdup(name);
-		g_savedRefs[g_nextSavedRef].gen = ref->gen;
-		ref->mount_id = MOUNT_ID_SAVED;
-		ref->index = g_nextSavedRef;
-
-		g_nextSavedRef = (g_nextSavedRef + 1) % (sizeof(g_savedRefs) / sizeof(g_savedRefs[0]));
-
-		libsimple_lock_unlock(&g_savedRefLock);
-
-		ret = 0;
-	}
-
+	ret = LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, vc.path, &st, follow ? 0 : LINUX_AT_SYMLINK_NOFOLLOW);
 	if (ret < 0)
-		ret = errno_linux_to_bsd(ret);
+		return errno_linux_to_bsd(ret);
 
-	return ret;
+	unsigned long long mount_id = 0;
+	mounts_id(LINUX_AT_FDCWD, vc.path, follow ? 0 : LINUX_AT_SYMLINK_NOFOLLOW, &mount_id);
+	ref->mount_id = MOUNT_ID_FILEID;
+	ref->id.volume = mounts_volume(st.st_dev);
+	ref->id.mount = (uint32_t) mount_id;
+	ref->id.objid = st.st_ino;
+
+	char* path = strdup(vc.path);
+	libsimple_lock_lock(&g_savedRefLock);
+
+	if (g_savedRefs[g_nextSavedRef].path)
+		free(g_savedRefs[g_nextSavedRef].path);
+
+	ref->id.gen = g_nextGen++;
+	g_savedRefs[g_nextSavedRef].path = path;
+	g_savedRefs[g_nextSavedRef].gen = ref->id.gen;
+	ref->id.index = g_nextSavedRef;
+
+	g_nextSavedRef = (g_nextSavedRef + 1) % (sizeof(g_savedRefs) / sizeof(g_savedRefs[0]));
+
+	libsimple_lock_unlock(&g_savedRefLock);
+
+	return 0;
+}
+
+// the path this process made the reference from, if it still names the object: 1, or 0
+static int saved_path(const RefData* ref, char name[4096])
+{
+	int found = 0;
+	struct linux_stat st;
+	unsigned int n = sizeof(g_savedRefs) / sizeof(g_savedRefs[0]);
+
+	if (ref->id.index < 0 || (unsigned int) ref->id.index >= n)
+		return 0;
+
+	libsimple_lock_lock(&g_savedRefLock);
+	const struct SavedRef* saved = &g_savedRefs[ref->id.index];
+	if (saved->path && saved->gen == ref->id.gen)
+		found = vchroot_unexpand_into(saved->path, name, 4096) == 0 &&
+			LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, saved->path, &st, LINUX_AT_SYMLINK_NOFOLLOW) == 0 &&
+			mounts_volume(st.st_dev) == ref->id.volume && st.st_ino == ref->id.objid;
+	libsimple_lock_unlock(&g_savedRefLock);
+	return found;
 }
 
 VISIBLE
 int sys_handle_to_name(RefData* ref, char name[4096])
 {
-	if (ref->mount_id == MOUNT_ID_SAVED)
-	{
-		int ret = -ENOENT;
-		libsimple_lock_lock(&g_savedRefLock);
-
-		if (g_savedRefs[ref->index].gen == ref->gen)
-		{
-			strlcpy(name, g_savedRefs[ref->index].path, 4096);
-			ret = sys_access(name, 0);
-		}
-
-		libsimple_lock_unlock(&g_savedRefLock);
-		return ret;
-	}
-
-	// Now we need to find out the path of ref->mount_id
-	struct simple_readline_buf rbuf;
-	char line[1024];
-
-	int fd_m = sys_open("/proc/self/mountinfo", BSD_O_RDONLY, 0);
-	if (fd_m < 0)
-		return fd_m;
-	const char* mount_path = NULL;
-	
-	__simple_readline_init(&rbuf);
-
-	while (__simple_readline(fd_m, &rbuf, line, sizeof(line)))
-	{
-		char *p, *saveptr;
-
-		p = strtok_r(line, " ", &saveptr);
-		if (p == NULL)
-			continue;
-
-		if (__simple_atoi(p, NULL) != ref->mount_id)
-			continue;
-
-		for (int i = 0; i < 4; i++)
-		{
-			p = strtok_r(NULL, " ", &saveptr);
-			if (p == NULL)
-			{
-				close_internal(fd_m);
-				return -ENOENT;
-			}
-		}
-
-		mount_path = p;
-
-		break;
-	}
-
-	close_internal(fd_m);
-
-	if (mount_path == NULL)
+	if (ref->mount_id != MOUNT_ID_FILEID)
 		return -ENOENT;
-	
-	// We have the path of the mount, lets get a file descriptor
-	#if defined(__NR_open)
-		fd_m = LINUX_SYSCALL(__NR_open, mount_path, LINUX_O_RDONLY, 0);
-	#else
-		fd_m = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, mount_path, LINUX_O_RDONLY, 0);
-	#endif
-	if (fd_m < 0)
-		return fd_m;
+	if (saved_path(ref, name))
+		return 0;
 
-	struct handle_to_path_args args;
-	args.mfd = fd_m;
-	memcpy(args.fh, &ref->fh, sizeof(RefData) - offsetof(RefData, fh));
-
-	int ret = lkm_call(NR_handle_to_path, &args);
-
-	close_internal(fd_m);
-
-	if (ret < 0)
-		return errno_linux_to_bsd(ret);
-
-	struct vchroot_unexpand_args uargs;
-	strcpy(uargs.path, args.path);
-
-	ret = vchroot_unexpand(&uargs);
-
-	if (ret < 0)
-		return errno_linux_to_bsd(ret);
-
-	strcpy(name, uargs.path);
-
-	return 0;
+	long ret = fileid_find(ref->id.volume, ref->id.mount, ref->id.objid, name, 4096);
+	return ret < 0 ? (int) ret : 0;
 }
 
-// Requires CAP_DAC_READ_SEARCH
+// Opens the object the reference is to (no longer needs CAP_DAC_READ_SEARCH)
 VISIBLE
 int sys_open_by_handle(RefData* ref, int flags)
 {
-	int linux_flags = oflags_bsd_to_linux(flags);
-
-	if (sizeof(void*) == 4)
-		linux_flags |= LINUX_O_LARGEFILE;
-
-	// Now we need to find out the path of ref->mount_id
-	struct simple_readline_buf rbuf;
-	char line[1024];
-
-	int fd_m = sys_open("/proc/self/mountinfo", BSD_O_RDONLY, 0);
-	if (fd_m < 0)
-		return fd_m;
-	const char* mount_path = NULL;
-	
-	__simple_readline_init(&rbuf);
-
-	while (__simple_readline(fd_m, &rbuf, line, sizeof(line)))
-	{
-		char *p, *saveptr;
-
-		p = strtok_r(line, " ", &saveptr);
-		if (p == NULL)
-			continue;
-
-		if (__simple_atoi(p, NULL) != ref->mount_id)
-			continue;
-
-		for (int i = 0; i < 4; i++)
-		{
-			p = strtok_r(NULL, " ", &saveptr);
-			if (p == NULL)
-			{
-				close_internal(fd_m);
-				return -ENOENT;
-			}
-		}
-
-		mount_path = p;
-
-		break;
-	}
-
-	close_internal(fd_m);
-
-	if (mount_path == NULL)
-		return -ENOENT;
-	
-	// We have the path of the mount, lets get a file descriptor
-	fd_m = sys_open(mount_path, BSD_O_RDONLY, 0);
-	if (fd_m < 0)
-		return fd_m;
-	
-	// And now, finally, open the file by handle relative to the mount
-	int ret = LINUX_SYSCALL(__NR_open_by_handle_at, fd_m, &ref->fh, linux_flags);
-
-	close_internal(fd_m);
-
+	char name[4096];
+	int ret = sys_handle_to_name(ref, name);
 	if (ret < 0)
-		ret = errno_linux_to_bsd(ret);
-
-	return ret;
+		return ret;
+	return sys_open(name, flags, 0);
 }
