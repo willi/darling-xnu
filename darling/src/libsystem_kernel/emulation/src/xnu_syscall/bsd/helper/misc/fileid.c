@@ -37,6 +37,10 @@
 //   and answers EACCES without it, but a search must list each directory, which takes read permission.
 // A process running as root (taffy's devices, for now) meets only the first.
 //
+// Object IDs are inode numbers, which Linux file systems reuse (ext4 hands a freed one out again; APFS never reuses a
+// file ID). A stale ID, say one LaunchServices recorded on an earlier boot, can lead to an unrelated object made since,
+// through the cache's recheck and a search alike: neither can tell.
+//
 // Binds of one file system into the process's mount namespace are one volume (one device): a search starts at the
 // mount the ID's hint names, then the others, in mountinfo's order. A bind's own objects are found in it as long as
 // binds of one file system don't overlap: otherwise another process may be given the other bind's path to an object
