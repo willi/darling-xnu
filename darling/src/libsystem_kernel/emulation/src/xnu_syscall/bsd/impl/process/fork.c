@@ -45,15 +45,24 @@ long sys_fork_special_ports_locked(void)
 {
 	int ret;
 	int wdfd = get_perthread_wd();
+	unsigned long long all_signals = ~0ull, signal_mask;
 
 	__darling_fork_prepare();
+	// The child starts with its signals blocked, until it has checked in on an RPC socket of its own. Until it has
+	// replaced it, it has its parent's socket: a signal handler's calls (interrupt_enter first) would go out on that
+	// socket, so the parent, waiting there for its fork_wait_for_child reply, could read the child's replies, and
+	// darlingserver would register the child before its checkin. Signals sent meanwhile stay pending.
+	LINUX_SYSCALL(__NR_rt_sigprocmask, 0 /* LINUX_SIG_BLOCK */, &all_signals, &signal_mask, sizeof(signal_mask));
 #ifdef SYS_fork
 	ret = LINUX_SYSCALL(__NR_fork);
 #else
 	ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
 #endif
 	if (ret != 0)
+	{
+		LINUX_SYSCALL(__NR_rt_sigprocmask, 2 /* LINUX_SIG_SETMASK */, &signal_mask, NULL, sizeof(signal_mask));
 		__darling_fork_parent();
+	}
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 	else if (ret == 0)
@@ -118,6 +127,9 @@ long sys_fork_special_ports_locked(void)
 		kqueue_atfork();
 		ulock_atfork_child();
 #endif
+
+		// registered, on our own socket: a signal handler may run now
+		LINUX_SYSCALL(__NR_rt_sigprocmask, 2 /* LINUX_SIG_SETMASK */, &signal_mask, NULL, sizeof(signal_mask));
 	}
 #ifndef VARIANT_DYLD
 	else if (ret > 0)
