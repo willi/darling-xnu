@@ -1,6 +1,7 @@
 #include <darling/emulation/common/simple.h>
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <sys/signal.h>
 
@@ -411,10 +412,36 @@ void __simple_vprintf(const char* format, va_list args)
 	LINUX_SYSCALL3(__NR_write, 1, buffer, __simple_strlen(buffer));
 }
 
+// Whether darlingserver logs kprintf strings: at its default log level it drops them, after the call. Each call is a
+// round trip, so ask once and make none it would drop. Its answer doesn't change while it runs (it reads its log
+// level once, at its start); a fork child keeps the answer, as it keeps the darlingserver, and an exec asks again.
+// 1, 0, or -1 before the first answer.
+static int kprintf_logged = -1;
+
+static int simple_kprintf_logged(void)
+{
+	int logged = __atomic_load_n(&kprintf_logged, __ATOMIC_RELAXED);
+
+	if (logged < 0)
+	{
+		bool answer = true;
+
+		// if it can't tell, make the calls, as before
+		if (dserver_rpc_kprintf_logged(&answer) < 0)
+			answer = true;
+		logged = answer ? 1 : 0;
+		__atomic_store_n(&kprintf_logged, logged, __ATOMIC_RELAXED);
+	}
+	return logged;
+}
+
 __attribute__ ((visibility ("default")))
 void __simple_vkprintf(const char* format, va_list args)
 {
 	char buffer[512];
+
+	if (!simple_kprintf_logged())
+		return;
 	__simple_vsnprintf(buffer, sizeof(buffer), format, args);
 	dserver_rpc_kprintf(buffer, __simple_strlen(buffer));
 }
