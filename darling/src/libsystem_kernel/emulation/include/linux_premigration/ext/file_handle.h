@@ -7,6 +7,7 @@
 
 CPP_EXTERN_BEGIN
 
+// Linux's, as fanotify reports one (fseventsd.m)
 struct file_handle
 {
 	uint32_t handle_bytes;
@@ -14,6 +15,10 @@ struct file_handle
 	uint8_t f_handle[1];
 };
 
+// mount_id of a reference sys_name_to_handle() makes: id is valid
+#define MOUNT_ID_FILEID (-101)
+
+// CarbonCore's FSRef (80 bytes)
 typedef struct {
 	union
 	{
@@ -27,28 +32,22 @@ typedef struct {
 			{
 				struct file_handle fh;
 
+				// the object's volume and object ID (fileid_find()), the Linux mount it was on as a hint, and where
+				// the process that made it keeps its path
 				struct
 				{
-					int index;
-					int gen;
-				};
+					uint32_t volume, mount;
+					uint64_t objid;
+					int index, gen;
+				} __attribute__((packed)) id;
 			};
 		};
 	};
 
 } RefData;
 
-// Like open_by_handle_at, but provides a path and doesn't need CAP_DAC_READ_SEARCH
-struct handle_to_path_args
-{
-	int mfd; // in
-	//int mntid; // in
-	char fh[80]; // in
-	char path[4096]; // out
-};
-
 int sys_name_to_handle(const char* name, RefData* ref, int follow);
-//int sys_open_by_handle(RefData* ref, int flags);
+int sys_open_by_handle(RefData* ref, int flags);
 int sys_handle_to_name(RefData* ref, char name[4096]);
 
 CPP_EXTERN_END

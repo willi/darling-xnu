@@ -2,7 +2,8 @@
 #define DARLING_EMULATION_FILEID_H
 
 // A file system object's path by its volume and object ID (ATTR_CMN_FSID's first word, mounts_volume(); and st_ino):
-// what fsgetpath() answers (impl/misc/fsgetpath.c).
+// what fsgetpath() answers (impl/misc/fsgetpath.c) and CarbonCore's FSRef resolves through
+// (linux_premigration/ext/file_handle.c).
 
 // The path of (dev, objid) as the process sees it (under the prefix, or /Volumes/SystemRoot outside it), into out (size
 // bytes) unless out is NULL: its length counting the NUL; or -ENOTSUP for a volume no mount is of, -ENOENT for an
