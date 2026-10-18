@@ -153,7 +153,6 @@ enum { CMN, VOL, DIR, FILE, EXT };
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
 extern void* memset(void* s, int c, __SIZE_TYPE__ n);
 extern __SIZE_TYPE__ strlen(const char* s);
-extern int strcmp(const char* s1, const char* s2);
 
 struct packer
 {
@@ -549,15 +548,13 @@ uint32_t attrlist_pack_volume(const struct xnu_attrlist* al, uint64_t options, c
 		put64(&p, VOL, ATTR_VOL_ENCODINGSUSED, 0);
 	if (v & ATTR_VOL_CAPABILITIES)
 	{
-		// fsgetpath() finds an object by its ID (impl/misc/fsgetpath.c), but not a file on an overlay, whose device is its
-		// layer's. Without PATH_FROM_ID CFURL has no _kCFURLFileIDKey for the volume's files, and LaunchServices then
-		// registers an app without its executable, as a placeholder with no SDK version: SpringBoard runs it in a
-		// 375x667 compatibility mode.
-		int is_overlay = strcmp(fs->f_fstypename, "overlay") == 0;
+		// as fsgetpath() can find the volume's objects by ID (impl/misc/fsgetpath.c). Without PATH_FROM_ID CFURL has no
+		// _kCFURLFileIDKey for the volume's files, and LaunchServices then registers an app without its executable, as
+		// a placeholder with no SDK version: SpringBoard runs it in a 375x667 compatibility mode.
 		uint32_t caps[8] = {
 			VOL_CAP_FMT_SYMBOLICLINKS | VOL_CAP_FMT_HARDLINKS | VOL_CAP_FMT_SPARSE_FILES | VOL_CAP_FMT_CASE_SENSITIVE |
 				VOL_CAP_FMT_CASE_PRESERVING | VOL_CAP_FMT_FAST_STATFS | VOL_CAP_FMT_2TB_FILESIZE |
-				(is_overlay ? 0 : VOL_CAP_FMT_PATH_FROM_ID) | VOL_CAP_FMT_64BIT_OBJECT_IDS,
+				(vol->path_from_id ? VOL_CAP_FMT_PATH_FROM_ID : 0) | VOL_CAP_FMT_64BIT_OBJECT_IDS,
 			VOL_CAP_INT_ATTRLIST | VOL_CAP_INT_ADVLOCK | VOL_CAP_INT_FLOCK | VOL_CAP_INT_EXTENDED_ATTR |
 				VOL_CAP_INT_RENAME_SWAP | VOL_CAP_INT_RENAME_EXCL,
 			0, 0, // reserved

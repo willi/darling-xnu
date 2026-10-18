@@ -356,6 +356,7 @@ long mounts_list(struct bsd_statfs64* buf, long count)
 struct device_roots
 {
 	unsigned long long dev;
+	const char* type;
 	int (*each)(const char* linux_mount_point, void* ctx);
 	void* ctx;
 };
@@ -366,9 +367,12 @@ static int device_root(const struct mountinfo* m, void* ctx)
 	struct linux_stat st;
 	unsigned long long id;
 
-	// a directory whose device is the one asked for, and no other mount over it (as list_mount())
+	// a directory whose device (or file system type) is the one asked for, and no other mount over it (as
+	// list_mount())
+	if (d->type && strcmp(m->type, d->type) != 0)
+		return 0;
 	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, m->on, &st, 0) < 0 || (st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR ||
-		(unsigned int) st.st_dev != d->dev)
+		(!d->type && (unsigned int) st.st_dev != d->dev))
 		return 0;
 	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, m->on, LINUX_O_PATH | LINUX_O_CLOEXEC, 0);
 	if (fd < 0)
@@ -381,6 +385,12 @@ static int device_root(const struct mountinfo* m, void* ctx)
 long mounts_each_root(unsigned long long dev, int (*each)(const char* linux_mount_point, void* ctx), void* ctx)
 {
 	struct device_roots d = { .dev = dev, .each = each, .ctx = ctx };
+	return each_mount(device_root, &d);
+}
+
+long mounts_each_of_type(const char* type, int (*each)(const char* linux_mount_point, void* ctx), void* ctx)
+{
+	struct device_roots d = { .type = type, .each = each, .ctx = ctx };
 	return each_mount(device_root, &d);
 }
 

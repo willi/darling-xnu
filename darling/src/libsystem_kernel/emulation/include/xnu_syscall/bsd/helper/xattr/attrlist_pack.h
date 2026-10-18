@@ -58,6 +58,8 @@ struct attrlist_volume
 {
 	const struct bsd_statfs64* fs;
 	const char* name;
+	// whether fsgetpath() finds the volume's objects (VOL_CAP_FMT_PATH_FROM_ID)
+	int path_from_id;
 };
 
 // 0 when XNU would accept the volume attributes asked for, else -EINVAL
