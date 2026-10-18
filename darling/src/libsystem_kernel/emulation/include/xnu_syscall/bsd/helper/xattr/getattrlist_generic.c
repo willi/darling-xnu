@@ -139,18 +139,16 @@ static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrl
 	return 0;
 }
 
-// linux_path: the absolute Linux path objfd was opened by, or NULL
-static long pack_object(int objfd, const char* linux_path, const struct xnu_attrlist* alist, unsigned long options,
-	char* out)
+// st: the object's Linux stat
+static long pack_object(int objfd, const struct xnu_attrlist* alist, unsigned long options, char* out,
+	struct linux_stat* st)
 {
 	struct object o;
 	long rv = describe(objfd, alist, options, &o);
 
 	if (rv < 0)
 		return rv;
-	// an ID handed out by path, which fsgetpath() can then answer without a search
-	if (linux_path && (alist->commonattr & (ATTR_CMN_OBJID | ATTR_CMN_FILEID)))
-		fileid_cache_note(o.st.st_dev, o.st.st_ino, linux_path);
+	*st = o.st;
 	rv = attrlist_check(alist, options, (o.st.st_mode & LINUX_S_IFMT) == LINUX_S_IFDIR);
 	if (rv < 0)
 		return rv;
@@ -233,18 +231,19 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
 #else
 		int objfd = fd;
 #endif
-#if HAS_PATH
-		const char* linux_path = vc.path;
-#else
-		const char* linux_path = 0;
-#endif
-		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, linux_path, alist, options, out);
+		struct linux_stat st;
+		rv = alist->volattr ? pack_volume(objfd, alist, options, out) : pack_object(objfd, alist, options, out, &st);
 #if HAS_PATH
 		close_internal(objfd);
 #endif
 		if (rv < 0)
 			return rv;
 		size = rv;
+#if HAS_PATH
+		// an ID handed out by path, once it is: fsgetpath() can then answer it without a search
+		if (!alist->volattr && (alist->commonattr & (ATTR_CMN_OBJID | ATTR_CMN_FILEID)))
+			fileid_cache_note(st.st_dev, st.st_ino, vc.path);
+#endif
 	}
 
 	// as XNU: the length is of what was returned, or with FSOPT_REPORT_FULLSIZE of everything asked for (so the caller
