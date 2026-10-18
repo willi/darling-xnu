@@ -14,7 +14,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
-#include <darling/emulation/xnu_syscall/bsd/impl/misc/fsgetpath.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid.h>
 
 // getattrlist(), fgetattrlist() and getattrlistat(): the attributes of an object, or of the volume it is on, packed as
 // attrlist_pack.h says.
@@ -185,7 +185,7 @@ static __attribute__((noinline)) long pack_volume(int objfd, const struct xnu_at
 
 	// a few lookups: only for the capabilities that report it
 	struct attrlist_volume vol = { .fs = &fs, .name = name,
-		.path_from_id = (alist->volattr & ATTR_VOL_CAPABILITIES) && fsgetpath_volume_searchable(objfd) };
+		.path_from_id = (alist->volattr & ATTR_VOL_CAPABILITIES) && fileid_volume_searchable(objfd) };
 	return attrlist_pack_volume(alist, options, &root.obj, &vol, out);
 }
 

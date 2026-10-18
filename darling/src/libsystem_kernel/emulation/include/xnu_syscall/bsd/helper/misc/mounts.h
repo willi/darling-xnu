@@ -16,7 +16,7 @@ static inline unsigned int mounts_volume(unsigned long long dev)
 
 // A volume's ID, fsid_t (statfs()'s f_fsid, ATTR_CMN_FSID): the device the object is on, as 32 bits, then the ID of
 // the Linux mount it's on, as a hint of which of the device's mounts (binds of one file system share a device). XNU's
-// fsgetpath() reads only the first word; Darling's searches the hinted mount first (impl/misc/fsgetpath.c).
+// fsgetpath() reads only the first word; Darling's searches the hinted mount first (helper/misc/fileid.c).
 static inline unsigned long long mounts_fsid(unsigned long long dev, unsigned long long mount_id)
 {
 	return mounts_volume(dev) | ((unsigned long long) (unsigned int) mount_id << 32);
