@@ -109,6 +109,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/helper/misc/readline.c
 	src/xnu_syscall/bsd/helper/misc/sha256.c
 	src/xnu_syscall/bsd/helper/misc/fdpath.c
+	src/xnu_syscall/bsd/helper/misc/fileid_cache.c
 	src/xnu_syscall/bsd/helper/misc/mounts.c
 	src/xnu_syscall/bsd/helper/misc/linux_path.c
 	src/xnu_syscall/bsd/helper/xattr/attrlist_pack.c

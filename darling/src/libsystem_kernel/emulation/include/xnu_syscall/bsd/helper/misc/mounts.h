@@ -20,6 +20,11 @@ long mounts_list(struct bsd_statfs64* buf, long count);
 // the root directory of a file system mounts_*statfs() described, opened O_PATH; or an error
 long mounts_open_root(const struct bsd_statfs64* fs);
 
+// calls each() with the mount point (a Linux path) of every mount whose root directory is on device dev (as the 32 bits
+// statfs()'s f_fsid has) and that no
+// other mount covers, until it returns nonzero (which is returned); 0 when none did, or a negative XNU errno
+long mounts_each_root(unsigned long long dev, int (*each)(const char* linux_mount_point, void* ctx), void* ctx);
+
 // The Linux mount an object is on (XNU's vnode_mount()), by Linux's mount ID: a file system's device numbers don't tell,
 // as an overlay reports its own for directories and its layers' for files. 1 and the ID, or 0 when Linux can't tell
 // (before Linux 5.8, without STATX_MNT_ID; or without statx() at all: ENOSYS, or EPERM from a seccomp profile), or a

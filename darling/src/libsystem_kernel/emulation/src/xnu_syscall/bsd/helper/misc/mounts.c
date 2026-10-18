@@ -353,6 +353,37 @@ long mounts_list(struct bsd_statfs64* buf, long count)
 	return ret < 0 ? ret : l.n;
 }
 
+struct device_roots
+{
+	unsigned long long dev;
+	int (*each)(const char* linux_mount_point, void* ctx);
+	void* ctx;
+};
+
+static int device_root(const struct mountinfo* m, void* ctx)
+{
+	struct device_roots* d = ctx;
+	struct linux_stat st;
+	unsigned long long id;
+
+	// a directory whose device is the one asked for, and no other mount over it (as list_mount())
+	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, m->on, &st, 0) < 0 || (st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR ||
+		(unsigned int) st.st_dev != d->dev)
+		return 0;
+	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, m->on, LINUX_O_PATH | LINUX_O_CLOEXEC, 0);
+	if (fd < 0)
+		return 0;
+	int covered = mounts_id(fd, "", LINUX_AT_EMPTY_PATH, &id) > 0 && id != m->id;
+	close_internal(fd);
+	return covered ? 0 : d->each(m->on, d->ctx);
+}
+
+long mounts_each_root(unsigned long long dev, int (*each)(const char* linux_mount_point, void* ctx), void* ctx)
+{
+	struct device_roots d = { .dev = dev, .each = each, .ctx = ctx };
+	return each_mount(device_root, &d);
+}
+
 long mounts_open_root(const struct bsd_statfs64* fs)
 {
 	struct vchroot_expand_args vc;

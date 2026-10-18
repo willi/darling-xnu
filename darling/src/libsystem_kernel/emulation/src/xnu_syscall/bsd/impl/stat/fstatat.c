@@ -7,6 +7,7 @@
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/common_at.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 
@@ -44,6 +45,8 @@ long sys_fstatat(int fd, const char* path, struct stat* stat, int flag)
 		return errno_linux_to_bsd(ret);
 
 	stat_linux_to_bsd(&lstat, stat);
+	// for fsgetpath()
+	fileid_cache_note((unsigned int) lstat.st_dev, lstat.st_ino, vc.path);
 
 	return 0;
 }
@@ -80,6 +83,8 @@ long sys_fstatat64(int fd, const char* path, struct stat64* stat, int flag)
 		return errno_linux_to_bsd(ret);
 
 	stat_linux_to_bsd64(&lstat, stat);
+	// for fsgetpath()
+	fileid_cache_note((unsigned int) lstat.st_dev, lstat.st_ino, vc.path);
 
 	return 0;
 }
