@@ -169,7 +169,6 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 
 	kern_printf("sigexc: sigrt_handler SUSPEND\n");
 
-	thread_t thread = mach_thread_self();
 	state_to_kernel(ctxt, &tstate, &fstate);
 
 	int ret = dserver_rpc_thread_suspended(&tstate, &fstate);
@@ -299,8 +298,6 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 #ifdef __x86_64__
 	kern_printf("sigexc: have RIP 0x%llx\n", ctxt->uc_mcontext.gregs.rip);
 #endif
-
-	thread_t thread = mach_thread_self();
 
 #if defined(__x86_64__)
 	x86_thread_state64_t tstate;
