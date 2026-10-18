@@ -18,4 +18,7 @@ int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linu
 void fileid_cache_note_absent(unsigned long long dev, unsigned long long ino);
 int fileid_cache_absent(unsigned long long dev, unsigned long long ino);
 
+// in a fork child, before anything else notes or looks up: frees the entries other threads held at fork()
+void fileid_cache_atfork_child(void);
+
 #endif // DARLING_EMULATION_FILEID_CACHE_H

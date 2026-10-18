@@ -9,7 +9,7 @@
 #	define __NR_fstatat64 __NR_newfstatat
 #endif
 
-// A small table, one entry per (dev, ino) hash, the newest note winning. stat() is on every hot path, so an entry is
+// A small table, one entry per (dev, ino) hash, the newest note winning. getattrlist() is on hot paths, so an entry is
 // taken with a compare-and-swap and never waited for: a busy entry (another thread's, or an interrupted note of this
 // one's, under a signal handler) is a skipped note or a miss. No lock, no system call, no signal mask to change.
 #define SLOTS 64
@@ -153,4 +153,13 @@ int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linu
 	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, linux_path, &st, LINUX_AT_SYMLINK_NOFOLLOW) < 0)
 		return 0;
 	return (unsigned int) st.st_dev == dev && st.st_ino == ino;
+}
+
+void fileid_cache_atfork_child(void)
+{
+	// the child has only the thread that forked: an entry another thread held then would stay busy for good
+	for (int i = 0; i < SLOTS; i++)
+		give(&slots[i].busy);
+	for (int i = 0; i < ABSENT_SLOTS; i++)
+		give(&absents[i].busy);
 }
