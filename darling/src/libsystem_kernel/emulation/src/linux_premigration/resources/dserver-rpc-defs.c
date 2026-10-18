@@ -77,7 +77,12 @@ void __dserver_rpc_hooks_push_reply(int socket, const dserver_rpc_hooks_msghdr_t
 	close_internal(pipe_ends[1]);
 
 	// and wait for a byte from the server
-	sys_read_nocancel(pipe_ends[0], &tmp, sizeof(tmp));
+	// darlingserver says whether it kept the reply, to send again once the interrupt ends (an older one always says so)
+	if (sys_read_nocancel(pipe_ends[0], &tmp, sizeof(tmp)) == sizeof(tmp) && tmp == DSERVER_PUSH_REPLY_DROPPED) {
+		dserver_rpc_hooks_printf("*** %d:%d: %s: darlingserver dropped the reply this thread got in its interrupt (call %u); "
+			"the call it interrupted may wait for it for ever ***\n", dserver_rpc_hooks_get_pid(), dserver_rpc_hooks_get_tid(),
+			__func__, (unsigned int) ((const dserver_rpc_replyhdr_t*) (uintptr_t) call.reply)->number);
+	}
 
 	close_internal(pipe_ends[0]);
 }
