@@ -25,7 +25,12 @@
 // MAXLONGPATHLEN (8192 since xnu-10063, macOS 14; a page before) is EINVAL; an ID no volume has is ENOTSUP; an object
 // the volume doesn't have is ENOENT; a path that doesn't fit the buffer is ENOSPC (build_path(), bsd/vfs/vfs_cache.c);
 // and the result is the path's length counting its terminating NUL.
-// Object ID 2 is the volume's root, as XNU's VFS_ROOT().
+// Object ID 2 is the volume's root, as XNU's VFS_ROOT(), unless the Linux file system has another object there.
+//
+// Binds of one file system into the process's mount namespace are one volume (one device): a search starts at the
+// mount fsid_t's second word hints at, then the others, in mountinfo's order. A bind's own objects are found in it as
+// long as binds of one file system don't overlap: otherwise another process may be given the other bind's path to an
+// object (one that's read-only, say).
 //
 // Linux opens a file by inode number only with a file system's own handle and CAP_DAC_READ_SEARCH
 // (open_by_handle_at()), so the path is:
@@ -82,7 +87,8 @@ struct level
 
 struct search
 {
-	unsigned long long dev, objid;
+	// the volume (and as a hint, the Linux mount: mounts_fsid()) and the object
+	unsigned long long dev, mount_id, objid;
 	// on btrfs, from mounts of other devices: into subvolumes; whether one of dev was found
 	int subvolumes, found_dev;
 	// directories the search read
@@ -266,7 +272,7 @@ static int probe_root(const char* mount_point, void* ctx)
 static int probe(struct search* s)
 {
 	struct probe p = { .s = s, .there = -1 };
-	mounts_each_root(s->dev, probe_root, &p);
+	mounts_each_root_from(s->dev, s->mount_id, probe_root, &p);
 	return p.there;
 }
 
@@ -289,13 +295,58 @@ static int first_root(const char* mount_point, void* ctx)
 	return 1;
 }
 
+// searches the volume's mounts, the hinted one first, logging what it took: as search_mount()
+static long search(struct search* s)
+{
+	long long t0 = now_ms();
+	s->dirs = 0;
+	long ret = mounts_each_root_from(s->dev, s->mount_id, search_mount, s);
+	__simple_kprintf("fsgetpath: searched device %llx for %llu: %s, %ld directories, %lld ms\n", s->dev, s->objid,
+		ret > 0 ? "found" : ret == 0 ? "not there" : "error", s->dirs, now_ms() - t0);
+	return ret;
+}
+
+// ID 2, with the volume's root in s->path: XNU's volumes have their root there, but a Linux file system may have
+// another object at 2 (tmpfs numbers its root 1, and the first object made in it 2). That one when there is one, else
+// the root.
+static long find_root(struct search* s)
+{
+	struct linux_stat st;
+	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, s->path, &st, 0) == 0 && st.st_ino == ROOT_OBJID)
+		return 0;
+	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, s->path, LINUX_O_PATH | LINUX_O_CLOEXEC, 0);
+	long type = fd < 0 ? 0 : fs_type(fd);
+	if (fd >= 0)
+		close_internal(fd);
+	// ext4's inode 2 is its root, above any directory a mount can have as its root: this one stands in for it
+	if (type == LINUX_EXT4_SUPER_MAGIC || fileid_cache_absent(s->dev, ROOT_OBJID))
+		return 0;
+
+	unsigned i;
+	for (i = 0; s->path[i]; i++)
+		s->seen[i] = s->path[i];
+	s->seen[i] = '\0';
+	long ret = search(s);
+	if (ret > 0)
+	{
+		fileid_cache_note(s->dev, s->objid, s->path);
+		return 0;
+	}
+	fileid_cache_note_absent(s->dev, ROOT_OBJID);
+	for (i = 0; s->seen[i]; i++)
+		s->path[i] = s->seen[i];
+	s->path[i] = '\0';
+	return ret < 0 ? ret : 0;
+}
+
 // the Linux path of (dev, objid) into s->path: 0, or a negative XNU errno
 static long find_object(struct search* s)
 {
-	if (s->objid != ROOT_OBJID && fileid_cache_find(s->dev, s->objid, s->path, sizeof(s->path)))
+	if (fileid_cache_find(s->dev, s->objid, s->path, sizeof(s->path)))
 		return 0;
 
-	long ret = mounts_each_root(s->dev, first_root, s->path);
+	// the volume's root: the hinted mount's, or the first
+	long ret = mounts_each_root_from(s->dev, s->mount_id, first_root, s->path);
 	if (ret < 0)
 		return ret;
 	if (ret == 0)
@@ -312,7 +363,7 @@ static long find_object(struct search* s)
 		return 0;
 	}
 	if (s->objid == ROOT_OBJID)
-		return 0;
+		return find_root(s);
 	if (fileid_cache_absent(s->dev, s->objid))
 		return -ENOENT;
 
@@ -328,10 +379,7 @@ static long find_object(struct search* s)
 		return 0;
 	}
 
-	long long t0 = now_ms();
-	ret = mounts_each_root(s->dev, search_mount, s);
-	__simple_kprintf("fsgetpath: searched device %llx for %llu: %s, %ld directories, %lld ms\n", s->dev, s->objid,
-		ret > 0 ? "found" : ret == 0 ? "not there" : "error", s->dirs, now_ms() - t0);
+	ret = search(s);
 	if (ret < 0)
 		return ret;
 	if (ret == 0)
@@ -349,8 +397,9 @@ long sys_fsgetpath_ext(char* buf, unsigned long size, void* fsid, unsigned long 
 		return -EINVAL;
 	if (!fsid)
 		return -EFAULT;
-	// fsid_t's first word is the volume (XNU's volfs ID): under Darling, the device as a 32-bit number
-	unsigned long long dev = ((const uint32_t*) fsid)[0];
+	// fsid_t's first word is the volume (XNU's volfs ID): under Darling, the device as a 32-bit number; the second, the
+	// Linux mount it was handed out for (mounts_fsid())
+	unsigned long long dev = ((const uint32_t*) fsid)[0], mount_id = ((const uint32_t*) fsid)[1];
 	if (size == 0 || size > XNU_MAXLONGPATHLEN)
 		return -EINVAL;
 
@@ -361,6 +410,7 @@ long sys_fsgetpath_ext(char* buf, unsigned long size, void* fsid, unsigned long 
 	if ((unsigned long) s > (unsigned long) -4096)
 		return -ENOMEM;
 	s->dev = dev;
+	s->mount_id = mount_id;
 	s->objid = objid;
 
 	long ret = find_object(s);

@@ -71,6 +71,12 @@ static int needs_path(const struct xnu_attrlist* al, unsigned long options)
 		((options & FSOPT_ATTR_CMN_EXTENDED) && (al->forkattr & (ATTR_CMNEXT_RELPATH | ATTR_CMNEXT_NOFIRMLINKPATH)));
 }
 
+// the mount the object is on, for its fsid_t's second word
+static int needs_mount(const struct xnu_attrlist* al, unsigned long options)
+{
+	return (al->commonattr & ATTR_CMN_FSID) || ((options & FSOPT_ATTR_CMN_EXTENDED) && (al->forkattr & ATTR_CMNEXT_REALFSID));
+}
+
 static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrlist* al, unsigned long options,
 	struct object* o)
 {
@@ -128,6 +134,8 @@ static __attribute__((noinline)) long describe(int objfd, const struct xnu_attrl
 
 	o->obj = (struct attrlist_object) { .st = st, .parent = &o->parent, .dirfd = LINUX_AT_FDCWD, .lookup = o->proc_path,
 		.name = o->name, .fullpath = fullpath };
+	if (needs_mount(al, options))
+		mounts_id(objfd, "", LINUX_AT_EMPTY_PATH, &o->obj.mount_id);
 	return 0;
 }
 
