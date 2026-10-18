@@ -78,6 +78,11 @@
 
 // the search: a directory per level being read, each with its own getdents64() buffer, in one mapping
 #define DEPTH_MAX 128
+// A lookup reads at most this many directories, across all the volume's mounts, then gives up with ENOENT (logged).
+// A device's directory has about 9,300 (taffy, a booted iPhone 16 with its golden copy), and its mount is the one an
+// ID's hint names, so it's searched first. The iOS 26.5 runtime root, a bind of the same file system, has 116,273
+// directories (416,751 entries); a cold walk of it took about 4 minutes. A stale ID (ENOENT) would walk all of it.
+#define SEARCH_DIRS_MAX 20000
 #define DIRENTS_SIZE 2048
 
 struct level
@@ -94,6 +99,8 @@ struct search
 	int subvolumes, found_dev;
 	// directories the search read
 	long dirs;
+	// whether it gave up at SEARCH_DIRS_MAX
+	int spent;
 	char path[VCHROOT_PATH_MAX]; // a Linux path; the one found, once found
 	// the path found as the process sees it: outside the prefix, under /Volumes/SystemRoot, so longer than path can be
 	char seen[VCHROOT_PATH_MAX + sizeof("/Volumes/SystemRoot")];
@@ -139,6 +146,11 @@ static int search_mount(const char* mount_point, void* ctx)
 	}
 	s->path[len] = '\0';
 
+	if (s->dirs >= SEARCH_DIRS_MAX)
+	{
+		s->spent = 1;
+		return 0;
+	}
 	int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, s->path, LINUX_O_RDONLY | LINUX_O_DIRECTORY | LINUX_O_CLOEXEC, 0);
 	if (fd < 0)
 		return 0;
@@ -202,6 +214,14 @@ static int search_mount(const char* mount_point, void* ctx)
 		{
 			close_internal(sub);
 			continue;
+		}
+		if (s->dirs >= SEARCH_DIRS_MAX)
+		{
+			close_internal(sub);
+			for (; depth >= 0; depth--)
+				close_internal(s->levels[depth].fd);
+			s->spent = 1;
+			return 0;
 		}
 		depth++;
 		s->dirs++;
@@ -309,7 +329,8 @@ static long search(struct search* s)
 	s->dirs = 0;
 	long ret = mounts_each_root_from(s->dev, s->mount_id, search_mount, s);
 	__simple_kprintf("fileid: searched device %llx for %llu: %s, %ld directories, %lld ms\n", s->dev, s->objid,
-		ret > 0 ? "found" : ret == 0 ? "not there" : "error", s->dirs, now_ms() - t0);
+		ret > 0 ? "found" : ret < 0 ? "error" : s->spent ? "gave up (SEARCH_DIRS_MAX)" : "not there", s->dirs,
+		now_ms() - t0);
 	return ret;
 }
 
