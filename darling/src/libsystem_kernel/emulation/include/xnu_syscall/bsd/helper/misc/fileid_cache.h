@@ -13,4 +13,8 @@ void fileid_cache_note(unsigned long long dev, unsigned long long ino, const cha
 // (not following a symlink at its end): 1, or 0
 int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linux_path, unsigned long size);
 
+// that (dev, ino) was found not to be there, for a while (a note of it forgets that)
+void fileid_cache_note_absent(unsigned long long dev, unsigned long long ino);
+int fileid_cache_absent(unsigned long long dev, unsigned long long ino);
+
 #endif // DARLING_EMULATION_FILEID_CACHE_H
