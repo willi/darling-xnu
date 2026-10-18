@@ -1,5 +1,6 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/process/posix_spawn.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/spawn.h>
@@ -32,6 +33,10 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigprocmask.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/common/sigsafe_lock.h>
+#include <darling/emulation/conversion/signal/duct_signals.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaction.h>
+#include <darling/emulation/linux_premigration/signal/exec_signals.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/process/fork.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/chdir.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
@@ -227,6 +232,18 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 	int nfileports = spawn_count_fileports(desc);
 	int* fileport_fds = __builtin_alloca(nfileports * sizeof(*fileport_fds));
 	int next_fileport = 0;
+	// the caller's signal mask, while signals are blocked across the fork
+	unsigned long long caller_mask = 0;
+	// POSIX_SPAWN_SETEXEC: no fork, this process execs; else the code below the fork runs in the forked child
+	const bool setexec = desc && desc->attrp && (desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC);
+	// POSIX_SPAWN_SETSIGDEF's signals, in Linux's numbers
+	linux_sigset_t sigdefault = 0;
+	// SETEXEC with SETSIGMASK: the mask to put back if the exec fails
+	sigset_t setexec_old_mask;
+	bool setexec_mask_set = false;
+
+	if (desc && desc->attrp && (desc->attrp->psa_flags & POSIX_SPAWN_SETSIGDEF))
+		sigset_bsd_to_linux(&desc->attrp->psa_sigdefault, &sigdefault);
 
 	if (nfileports > 0)
 	{
@@ -235,7 +252,7 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 			return ret;
 	}
 
-	if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
+	if (setexec)
 	{
 		if (nports > 0)
 		{
@@ -288,6 +305,10 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 		}
 	}
 
+	// XNU's posix_spawn() runs none of the caller's code in the new process. The child here runs its setup
+	// before the exec: with signals blocked from the fork until its handlers are reset, none of the caller's
+	// handlers can run in it.
+	caller_mask = signals_block_all();
 	if ((my_pid = (nports > 0) ? sys_fork_special_ports_locked() : sys_fork()) == 0)
 	{
 		// child
@@ -303,6 +324,18 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 		if (nports > 0)
 			libsimple_lock_unlock(&fork_special_ports_lock);
 
+		// Before any of its setup, as the new image will have them: the caught signals and SETSIGDEF's at their
+		// default, the ignored ones ignored (exec_signals.h); then the mask the new image starts with, the caller's
+		// or SETSIGMASK's. A signal that comes while a file action blocks (an open on a FIFO) then does what it would
+		// in the new image: SIGINT ends the child, as XNU's interruptible sleep would end the spawn, and
+		// darlingserver's own two signals reach it. No caller's handler can run in it, and none did before this:
+		// signals were blocked from before the fork.
+		exec_signals_reset_caught(sigdefault);
+		linux_sigset_t start_mask = caller_mask;
+		if (desc && desc->attrp && (desc->attrp->psa_flags & POSIX_SPAWN_SETSIGMASK))
+			sigset_bsd_to_linux(&desc->attrp->psa_sigmask, &start_mask);
+		signals_restore(start_mask);
+
 no_fork:
 		if (desc && desc->attrp)
 		{
@@ -317,11 +350,14 @@ no_fork:
 				if (ret != 0)
 					goto fail;
 			}
-			if (desc->attrp->psa_flags & POSIX_SPAWN_SETSIGMASK)
+			// the forked child took it above; this process gets it back if its exec fails (SETPGROUP and
+			// RESETIDS aren't undone: a divergence from XNU, which applies them to the activated image only)
+			if (setexec && (desc->attrp->psa_flags & POSIX_SPAWN_SETSIGMASK))
 			{
-				ret = sys_sigprocmask(3 /* SIG_SETMASK */, &desc->attrp->psa_sigmask, NULL);
+				ret = sys_sigprocmask(3 /* SIG_SETMASK */, &desc->attrp->psa_sigmask, &setexec_old_mask);
 				if (ret != 0)
 					goto fail;
+				setexec_mask_set = true;
 			}
 			if (desc->attrp->psa_flags & _POSIX_SPAWN_DISABLE_ASLR)
 			{
@@ -581,13 +617,18 @@ no_fork:
 			envp = new_envp;
 		}
 
-		// the no-fork case has no pipe (-1): its caller is the process that execs
-		ret = sys_execve_spawn((char*) path, (const char**) argvp, (const char**) envp, pipe[1]);
+		// The no-fork case has no pipe (-1): its caller is the process that execs. It gets SETSIGDEF at the
+		// exec, undone if that fails, as XNU applies it once the image is active (kern_exec.c); the forked child
+		// has it already.
+		ret = sys_execve_spawn((char*) path, (const char**) argvp, (const char**) envp, pipe[1],
+			setexec ? sigdefault : 0);
 fail:
 		//__simple_kprintf("posix_spawn is failing with %d\n", ret);
-		if (desc && desc->attrp && desc->attrp->psa_flags & POSIX_SPAWN_SETEXEC)
+		if (setexec)
 		{
 			// no_fork case
+			if (setexec_mask_set)
+				sys_sigprocmask(3 /* SIG_SETMASK */, &setexec_old_mask, NULL);
 			spawn_close_fileports(fileport_fds, nfileports);
 			if (nports > 0)
 				spawn_restore_special_ports(ports, nports);
@@ -618,6 +659,9 @@ fail:
 
 		if (_libkernel_darling_functions)
 			_libkernel_darling_functions->posix_spawn_parent();
+		// Only now, with the fork's locks released (special ports, libSystem's atfork ones): the signals that came
+		// meanwhile are delivered here, and a handler may fork, or malloc, itself.
+		signals_restore(caller_mask);
 		spawn_close_fileports(fileport_fds, nfileports);
 		nfileports = 0;
 
