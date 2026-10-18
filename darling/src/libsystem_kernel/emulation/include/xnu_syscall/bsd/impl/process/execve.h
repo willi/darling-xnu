@@ -1,6 +1,8 @@
 #ifndef LINUX_EXECVE_H
 #define LINUX_EXECVE_H
 
+#include <darling/emulation/conversion/signal/duct_signals.h>
+
 long sys_execve(const char* fname, const char** argvp, const char** envp);
 
 // sys_execve() for posix_spawn()'s child. spawn_fd is the write end of the pipe its parent reads, which then returns
@@ -14,6 +16,8 @@ long sys_execve(const char* fname, const char** argvp, const char** envp);
 // - anything else (a Linux program) closes it at the exec: it stays close-on-exec.
 // The parent and mldr ship together: an mldr that doesn't know __mldr_spawn_pipe keeps the descriptor open, and the
 // parent waits until the child exits.
-long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, int spawn_fd);
+// `sigdefault`: the signals the new image starts with at their default, ignored or not (POSIX_SPAWN_SETSIGDEF), a
+// Linux set; Linux's dispositions are as before if the exec fails (exec_signals_prepare()).
+long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, int spawn_fd, linux_sigset_t sigdefault);
 
 #endif // LINUX_EXECVE_H

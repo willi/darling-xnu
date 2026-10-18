@@ -16,6 +16,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
+#include <darling/emulation/linux_premigration/signal/exec_signals.h>
 #include <darling/emulation/common/simple.h>
 
 #include <darlingserver/rpc.h>
@@ -265,7 +266,10 @@ void darling_sigexc_self(void)
 	// Make sigexc_handler the handler for all signals in the process
 	for (int i = 1; i <= 31; i++)
 	{
-		if (i == LINUX_SIGSTOP || i == LINUX_SIGKILL || i == LINUX_SIGCHLD)
+		if (i == LINUX_SIGSTOP || i == LINUX_SIGKILL)
+			continue;
+		// A signal ignored before the exec stays ignored, and is recorded so (exec_signals.h). SIGCHLD stays Linux's.
+		if (exec_signals_import(i) || i == LINUX_SIGCHLD)
 			continue;
 
 		struct linux_sigaction sa;
@@ -275,18 +279,6 @@ void darling_sigexc_self(void)
 		sa.sa_flags = LINUX_SA_RESTORER | LINUX_SA_SIGINFO | LINUX_SA_RESTART | LINUX_SA_ONSTACK;
 		sa.sa_restorer = sig_restorer;
 
-		// A signal ignored before the exec stays ignored, as the app has it (execve.c, exec_keep_ignored()).
-		// dyld runs this before libsystem_kernel does, each with its own sig_handlers, and the app's sigaction()
-		// reads libsystem_kernel's: dyld leaves such a signal ignored, for libsystem_kernel to find.
-		struct linux_sigaction old;
-		if (LINUX_SYSCALL(__NR_rt_sigaction, i, NULL, &old, sizeof(sa.sa_mask)) == 0
-				&& old.sa_sigaction == (linux_sig_handler*) 1 /* SIG_IGN */)
-		{
-			sig_handlers[i] = XNU_SIG_IGN;
-#ifdef VARIANT_DYLD
-			continue;
-#endif
-		}
 		LINUX_SYSCALL(__NR_rt_sigaction, i, &sa, NULL, sizeof(sa.sa_mask));
 	}
 

@@ -18,6 +18,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/readlink.h>
 #include <darling/emulation/linux_premigration/signal/sigexc.h>
+#include <darling/emulation/linux_premigration/signal/exec_signals.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
@@ -37,39 +38,6 @@ extern bool isspace(char c);
 extern void _xtrace_execve_inject(const char*** envp_ptr);
 
 extern void sig_restorer(void);
-
-// XNU's exec keeps a signal the process ignores ignored (execsigs(), bsd/kern/kern_sig.c), and so would Linux's. But
-// Darling's handler takes every signal (darling_sigexc_self()), which only notes that the app ignores it, and Linux's
-// exec resets a handled signal to its default. So Linux gets SIG_IGN for those before the exec, and the new image's
-// darling_sigexc_self() takes it over. SIGWINCH and SIGURG are left alone: they are ignored by default, on XNU as on
-// Linux. Answers the signals it changed, whose actions it saves in `old`.
-static unsigned int exec_keep_ignored(struct linux_sigaction old[32])
-{
-	struct linux_sigaction ign = { .sa_sigaction = (linux_sig_handler*) 1 /* SIG_IGN */,
-		.sa_flags = LINUX_SA_RESTORER, .sa_restorer = sig_restorer };
-	unsigned int changed = 0;
-
-	for (int sig = 1; sig < 32; sig++)
-	{
-		if (sig == LINUX_SIGKILL || sig == LINUX_SIGSTOP || sig == LINUX_SIGWINCH || sig == LINUX_SIGURG)
-			continue;
-		if (sig_handlers[sig] != XNU_SIG_IGN)
-			continue;
-		if (LINUX_SYSCALL(__NR_rt_sigaction, sig, &ign, &old[sig], sizeof(ign.sa_mask)) == 0)
-			changed |= 1u << sig;
-	}
-	return changed;
-}
-
-// the exec failed: the handlers exec_keep_ignored() replaced are back
-static void exec_restore_ignored(unsigned int changed, const struct linux_sigaction old[32])
-{
-	for (int sig = 1; sig < 32; sig++)
-	{
-		if (changed & (1u << sig))
-			LINUX_SYSCALL(__NR_rt_sigaction, sig, &old[sig], NULL, sizeof(old[sig].sa_mask));
-	}
-}
 
 static inline bool istext(char c)
 {
@@ -91,10 +59,10 @@ static long exec_check_permissions(const char* linux_path)
 
 long sys_execve(const char* fname, const char** argvp, const char** envp)
 {
-	return sys_execve_spawn(fname, argvp, envp, -1);
+	return sys_execve_spawn(fname, argvp, envp, -1, 0);
 }
 
-long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, int spawn_fd)
+long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, int spawn_fd, linux_sigset_t sigdefault)
 {
 	int ret;
 	struct vchroot_expand_args vc;
@@ -316,14 +284,15 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 	if (pass_spawn_fd)
 		LINUX_SYSCALL(__NR_fcntl, spawn_fd, LINUX_F_SETFD, 0);
 
-	struct linux_sigaction ignored_old[32];
-	unsigned int ignored = exec_keep_ignored(ignored_old);
+	// the new image's signals: ignored ones stay ignored, SETSIGDEF's get their default (exec_signals.h)
+	struct exec_signals_saved signals_saved;
+	exec_signals_prepare(&signals_saved, sigdefault);
 
 	ret = LINUX_SYSCALL(__NR_execve, path_to_exec, argvp, envp);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 
-	exec_restore_ignored(ignored, ignored_old);
+	exec_signals_failed(&signals_saved);
 
 	if (pass_spawn_fd)
 		LINUX_SYSCALL(__NR_fcntl, spawn_fd, LINUX_F_SETFD, LINUX_FD_CLOEXEC);

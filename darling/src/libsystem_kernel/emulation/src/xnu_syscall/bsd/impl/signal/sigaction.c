@@ -8,6 +8,7 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/linux_premigration/signal/sigexc.h>
+#include <darling/emulation/linux_premigration/signal/exec_signals.h>
 #include <darling/emulation/linux_premigration/signal/signal_knotes.h>
 
 #include <darlingserver/rpc.h>
@@ -50,7 +51,9 @@ long sys_sigaction(int signum, const struct bsd___sigaction* nsa, struct bsd_sig
 		return 0;
 	}
 
-	if (nsa != NULL && (linux_signum == LINUX_SIGCHLD || linux_signum == LINUX_SIGTTOU))
+	// CHLD, TTIN and TTOU go to Linux, which acts on their disposition itself (exec_signals.h); KILL and STOP, which
+	// can't be caught, are only recorded, as before
+	if (nsa != NULL && sig_linux_owned(linux_signum) && linux_signum != LINUX_SIGKILL && linux_signum != LINUX_SIGSTOP)
 	{
 		sa_tramp = nsa->sa_tramp;
 		if (nsa->sa_sigaction != XNU_SIG_DFL && nsa->sa_sigaction != XNU_SIG_IGN

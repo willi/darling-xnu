@@ -90,6 +90,7 @@ set(linux_premigration_sources
 	src/linux_premigration/misc/ioctl.c
 	src/linux_premigration/resources/dserver-rpc-defs.c
 	src/linux_premigration/signal/sig_restorer.S
+	src/linux_premigration/signal/exec_signals.c
 	src/linux_premigration/signal/sigexc.c
 	src/linux_premigration/signal/signal_knotes.c
 	src/linux_premigration/elfcalls_wrapper.c
