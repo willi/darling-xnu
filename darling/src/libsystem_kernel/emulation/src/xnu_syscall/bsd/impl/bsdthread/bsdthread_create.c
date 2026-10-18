@@ -69,9 +69,13 @@ long sys_bsdthread_create(void* thread_start, void* arg,
 	ret = darling_thread_create((void**) stack, pthread_entry_point_wrapper, thread_start,
 			arg, stacksize, flags);
 #else
-	return __darling_thread_create(((uintptr_t)stack), pthread_obj_size,
+	void* created = __darling_thread_create(((uintptr_t)stack), pthread_obj_size,
 			pthread_entry_point_wrapper, thread_start, arg, (uintptr_t) stack, flags,
 			&callbacks, pthread);
+
+	// mldr couldn't start the thread. XNU's bsdthread_create fails with ENOMEM when thread_create does
+	// (libpthread's kern/kern_support.c), and libpthread's pthread_create then returns EAGAIN.
+	return (created != NULL) ? (long) created : -ENOMEM;
 #endif
 
 	if (ret < 0)

@@ -182,8 +182,13 @@ void workq_thread_request(workq_prepare_f prepare, void* context)
 	request->prepare = prepare;
 	request->context = context;
 
-	__darling_thread_create(512*1024, pthread_obj_size, workq_requested_thread_start, 0, (uintptr_t) request,
-			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0, &callbacks, NULL);
+	if (__darling_thread_create(512*1024, pthread_obj_size, workq_requested_thread_start, 0, (uintptr_t) request,
+			extract_wq_flags(_pthread_priority_make_from_thread_qos(THREAD_QOS_DEFAULT, 0, 0)), 0, &callbacks, NULL) == NULL)
+	{
+		// lost, as a REQTHREADS request below is
+		__simple_printf("workq: couldn't start a thread for a request\n");
+		free(request);
+	}
 }
 
 // Parks the calling workqueue thread until a request needs it, or terminates it if none does for a while.
@@ -332,14 +337,14 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 				libsimple_lock_unlock(&workq_parked_lock);
 
 				// __simple_printf("Spawning a new thread\n");
-				__darling_thread_create(512*1024, pthread_obj_size, wqueue_entry_point_wrapper, 0,
-						NULL, flags, 0, &callbacks, NULL);
-
-				/*if (ret < 0)
+				if (__darling_thread_create(512*1024, pthread_obj_size, wqueue_entry_point_wrapper, 0,
+						NULL, flags, 0, &callbacks, NULL) == NULL)
 				{
-					__simple_printf("Failed to spawn a new thread, err %d\n", -ret);
-					return ret;
-				}*/
+					// XNU keeps such a request queued and retries (workq_schedule_delayed_thread_creation() in
+					// bsd/pthread/pthread_workqueue.c); here it's lost, but its running-thread slot comes back
+					__simple_printf("workq: couldn't start a thread\n");
+					sem_up(&workq_sem);
+				}
 			}
 			return 0;
 		}
