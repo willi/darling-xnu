@@ -11,6 +11,7 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaltstack.h>
 #include <darling/emulation/other/mach/lkm.h>
+#include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
@@ -157,10 +158,57 @@ void sigexc_setup(void)
 //   (darlingserver's own two can still arrive while the checkout is in flight, and their handler's calls then come
 //   after it: a known gap);
 // - exec and a process's start: by construction, as libsystem_kernel installs these handlers (__libkernel_init) after
-//   mldr has checked in.
+//   mldr has checked in;
+// - a thread Darling didn't start: on_host_thread() below.
 // darlingserver logs a thread whose first call isn't its checkin.
+
+// A thread that a host library started with glibc's pthread_create (a Vulkan driver's worker, glibc's SIGEV_THREAD
+// helper) never checks in, and has its creator's signal mask: Linux gives it signals sent to the process. Without a
+// socket, the handlers' first call would end the process (mldr's __darling_thread_rpc_socket). Answers whether this is
+// such a thread, after dealing with the signal:
+// - one sent to the process goes back to it, siginfo and all, for a Darwin thread to take; this thread blocks it from
+//   now on (Linux picks a thread that doesn't block it). A signal sent to this very thread goes to the process too:
+//   no Darwin code knows the thread to send it one;
+// - a fault can't be taken elsewhere. Linux's default action ends the process, as in a Linux program: the faulting
+//   instruction runs again once the handler is gone.
+static bool on_host_thread(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
+{
+	if (__dserver_thread_has_socket())
+		return false;
+
+	int pid = LINUX_SYSCALL0(__NR_getpid);
+	bool fault = info->si_code > 0 && (linux_signum == LINUX_SIGSEGV || linux_signum == LINUX_SIGBUS
+		|| linux_signum == LINUX_SIGILL || linux_signum == LINUX_SIGFPE || linux_signum == LINUX_SIGTRAP
+		|| linux_signum == LINUX_SIGSYS);
+
+	if (fault)
+	{
+		__simple_fprintf(2, "sigexc: signal %d, a fault, on thread %d, which Darling didn't start: Linux's default "
+			"action\n", linux_signum, (int) LINUX_SYSCALL0(__NR_gettid));
+
+		struct linux_sigaction sa;
+		sa.sa_sigaction = (linux_sig_handler*) NULL; // SIG_DFL
+		sa.sa_mask = 0;
+		sa.sa_flags = LINUX_SA_RESTORER;
+		sa.sa_restorer = sig_restorer;
+		LINUX_SYSCALL(__NR_rt_sigaction, linux_signum, &sa, NULL, sizeof(sa.sa_mask));
+		return true;
+	}
+
+	ctxt->uc_sigmask |= 1ull << (linux_signum - 1);
+	// Linux accepts any siginfo sent to the sender's own process; a full queue (EAGAIN) is for real-time signals only
+	if (LINUX_SYSCALL(__NR_rt_sigqueueinfo, pid, linux_signum, info) < 0)
+		LINUX_SYSCALL(__NR_kill, pid, linux_signum);
+	return true;
+}
+
 void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
+	// darlingserver sends its two to a thread it knows; one that came here was for a thread gone, whose TID Linux has
+	// given this one
+	if (!__dserver_thread_has_socket())
+		return;
+
 	int status = dserver_rpc_interrupt_enter();
 
 	if (status != 0) {
@@ -282,6 +330,9 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
 // see sigrt_handler on when it may run
 void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
+	if (on_host_thread(linux_signum, info, ctxt))
+		return;
+
 	int status = dserver_rpc_interrupt_enter();
 
 	if (status != 0) {

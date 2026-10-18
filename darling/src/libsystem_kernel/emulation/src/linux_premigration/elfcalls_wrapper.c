@@ -86,6 +86,10 @@ int __dserver_per_thread_socket(void) {
 	return elfcalls()->dserver_per_thread_socket();
 };
 
+bool __dserver_thread_has_socket(void) {
+	return elfcalls()->dserver_thread_has_socket();
+}
+
 void __dserver_per_thread_socket_refresh(void) {
 	return elfcalls()->dserver_per_thread_socket_refresh();
 };
