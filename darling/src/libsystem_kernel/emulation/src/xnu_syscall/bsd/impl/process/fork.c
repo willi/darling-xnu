@@ -10,6 +10,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/fchdir.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/common/simple.h>
+#include <darling/emulation/common/sigsafe_lock.h>
 #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
 #include <darling/emulation/other/mach/lkm.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
@@ -29,6 +30,14 @@ extern void kqueue_atfork(void);
 
 libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
 
+#ifndef VARIANT_DYLD
+// For tests (darling-tests/fork_special_ports, which sets it through dlsym()): while it's set, a fork child stops
+// itself before it has an RPC socket of its own or has checked in, so that a test can signal the child or its
+// parent, or kill the child, while the parent's fork() waits. Only this process has it: the child clears its copy,
+// so its own forks don't stop, and exec drops it.
+VISIBLE int __darling_fork_stop_child;
+#endif
+
 long sys_fork(void)
 {
 	long ret;
@@ -44,7 +53,15 @@ long sys_fork_special_ports_locked(void)
 {
 	int ret;
 	int wdfd = get_perthread_wd();
+	unsigned long long signal_mask;
 
+	// The child starts with its signals blocked, until it has checked in on an RPC socket of its own. Until it has
+	// replaced it, it has its parent's socket: a signal handler's calls (interrupt_enter first) would go out on that
+	// socket, so the parent, waiting there for its fork_wait_for_child reply, could read the child's replies, and
+	// darlingserver would register the child before its checkin. Signals sent meanwhile stay pending; a hardware
+	// fault meanwhile kills the child, with no Mach exception or crash report. The parent's are blocked from before
+	// mldr's fork handlers (which hold its socket table's lock) until after them.
+	signal_mask = signals_block_all();
 	__darling_fork_prepare();
 #ifdef SYS_fork
 	ret = LINUX_SYSCALL(__NR_fork);
@@ -52,22 +69,32 @@ long sys_fork_special_ports_locked(void)
 	ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
 #endif
 	if (ret != 0)
+	{
 		__darling_fork_parent();
+		signals_restore(signal_mask);
+	}
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 	else if (ret == 0)
 	{
 		// in the child
 		__darling_fork_child();
-		// before a signal handler can unmap memory, which takes the table's lock
+		// before any signal handler, which may unmap memory and take the table's lock
 		purgeable_atfork_child();
 
 #ifndef VARIANT_DYLD
+		// for tests: see __darling_fork_stop_child
+		if (__darling_fork_stop_child)
+		{
+			__darling_fork_stop_child = 0;
+			LINUX_SYSCALL(__NR_kill, LINUX_SYSCALL0(__NR_getpid), LINUX_SIGSTOP);
+		}
+
 		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
-		// take: a signal meanwhile would write to it
+		// take: a signal handler would write to it
 		signal_knotes_atfork_child();
 
-		// the socket tables' locks, before a signal handler can take them (socktables.h)
+		// the socket tables' locks, before any signal handler can take them (socktables.h)
 		socket_tables_atfork_child();
 #endif
 
@@ -112,6 +139,9 @@ long sys_fork_special_ports_locked(void)
 		kqueue_atfork();
 		ulock_atfork_child();
 #endif
+
+		// registered, on our own socket: a signal handler may run now
+		signals_restore(signal_mask);
 	}
 #ifndef VARIANT_DYLD
 	else if (ret > 0)

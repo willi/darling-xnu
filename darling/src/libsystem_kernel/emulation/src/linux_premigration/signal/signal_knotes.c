@@ -30,18 +30,8 @@ static inline uint64_t slot_make(int signum, int fd)
 	return ((uint64_t) signum << 32) | (uint32_t) fd;
 }
 
-// With every signal blocked, a signal handler on this thread can't run while it is posting (and wait on itself in
-// signal_knote_close()); the lock is a sigsafe_lock.h one for the same reason.
-static void block_signals(linux_sigset_t* old)
-{
-	linux_sigset_t all = ~0ULL;
-	LINUX_SYSCALL(__NR_rt_sigprocmask, 0 /* LINUX_SIG_BLOCK */, &all, old, sizeof(linux_sigset_t));
-}
-
-static void restore_signals(const linux_sigset_t* old)
-{
-	LINUX_SYSCALL(__NR_rt_sigprocmask, 2 /* LINUX_SIG_SETMASK */, old, NULL, sizeof(linux_sigset_t));
-}
+// Posting blocks every signal, so that a signal handler on this thread can't run while it is posting (and wait on
+// itself in signal_knote_close()); the lock is a sigsafe_lock.h one for the same reason.
 
 int signal_knote_open(int signum)
 {
@@ -111,13 +101,13 @@ void signal_knote_close(int fd)
 void signal_knotes_post(int signum)
 {
 	static const uint64_t one = 1;
-	linux_sigset_t old;
+	unsigned long long old;
 	int i;
 
 	if (signum <= 0 || signum >= 32)
 		return;
 
-	block_signals(&old);
+	old = signals_block_all();
 	__atomic_add_fetch(&signal_knotes_posting, 1, __ATOMIC_SEQ_CST);
 	for (i = 0; i < SIGNAL_KNOTES_MAX; i++)
 	{
@@ -126,7 +116,7 @@ void signal_knotes_post(int signum)
 			LINUX_SYSCALL(__NR_write, (int) (uint32_t) slot, &one, sizeof(one));
 	}
 	__atomic_sub_fetch(&signal_knotes_posting, 1, __ATOMIC_SEQ_CST);
-	restore_signals(&old);
+	signals_restore(old);
 }
 
 void signal_knotes_atfork_child(void)
