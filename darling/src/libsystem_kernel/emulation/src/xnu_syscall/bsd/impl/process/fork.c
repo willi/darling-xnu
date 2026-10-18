@@ -26,9 +26,16 @@
 extern _libkernel_functions_t _libkernel_functions;
 extern int _mach_fork_parent(void);
 extern void kqueue_atfork(void);
-extern char* getenv(const char* name);
 
 libsimple_lock_t fork_special_ports_lock = LIBSIMPLE_LOCK_INITIALIZER;
+
+#ifndef VARIANT_DYLD
+// For tests (darling-tests/fork_special_ports, which sets it through dlsym()): while it's set, a fork child stops
+// itself before it has an RPC socket of its own or has checked in, so that a test can signal the child or its
+// parent, or kill the child, while the parent's fork() waits. Only this process has it: the child clears its copy,
+// so its own forks don't stop, and exec drops it.
+VISIBLE int __darling_fork_stop_child;
+#endif
 
 long sys_fork(void)
 {
@@ -73,10 +80,12 @@ long sys_fork_special_ports_locked(void)
 		purgeable_atfork_child();
 
 #ifndef VARIANT_DYLD
-		// For tests (darling-tests/fork_special_ports): the child stops itself here, before it has its own RPC socket
-		// or has checked in, so that a test can signal it or its parent, or kill it, while the parent's fork() waits.
-		if (getenv("__DARLING_FORK_STOP_CHILD"))
+		// for tests: see __darling_fork_stop_child
+		if (__darling_fork_stop_child)
+		{
+			__darling_fork_stop_child = 0;
 			LINUX_SYSCALL(__NR_kill, LINUX_SYSCALL0(__NR_getpid), LINUX_SIGSTOP);
+		}
 
 		// before guard_table_postfork_child closes the parent's knote eventfds, whose numbers the new RPC socket may
 		// take: a signal meanwhile would write to it
