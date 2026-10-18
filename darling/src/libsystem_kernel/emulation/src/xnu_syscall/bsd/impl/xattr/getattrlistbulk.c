@@ -4,11 +4,13 @@
 #include <sys/errno.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/common_at.h>
 #include <darling/emulation/conversion/dirent/getdirentries.h>
 #include <darling/emulation/conversion/errno.h>
 #include <darling/emulation/conversion/stat/common.h>
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/mounts.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/xattr/attrlist_pack.h>
 
@@ -25,14 +27,37 @@
 
 #define LINUX_SEEK_SET 0
 #define LINUX_SEEK_CUR 1
+#define ATTR_CMN_OBJID 0x00000020
+#define ATTR_CMN_FILEID 0x02000000
+// the longest path fileid_cache_note() keeps
+#define NOTED_PATH_MAX 1024
 
 
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ n);
 extern void* memset(void* s, int c, __SIZE_TYPE__ n);
 
+// an ID handed out for an entry of the directory at dir_path (a Linux path, or NULL), for fsgetpath()
+static void note(const char* dir_path, const char* name, const struct linux_stat* st)
+{
+	char path[NOTED_PATH_MAX];
+	int n = 0;
+	if (!dir_path)
+		return;
+	for (; dir_path[n] && n < NOTED_PATH_MAX - 1; n++)
+		path[n] = dir_path[n];
+	if (n > 1 && n < NOTED_PATH_MAX - 1)
+		path[n++] = '/';
+	for (int i = 0; name[i] && n < NOTED_PATH_MAX - 1; i++)
+		path[n++] = name[i];
+	if (n >= NOTED_PATH_MAX - 1)
+		return;
+	path[n] = '\0';
+	fileid_cache_note((unsigned int) st->st_dev, st->st_ino, path);
+}
+
 // one entry into out (ATTRLIST_PACK_MAX bytes); returns its size, or 0 to leave the entry out
-static uint32_t pack_entry(int dirfd, const struct linux_stat* dir_st, unsigned long long mount_id, const char* name,
-	const struct xnu_attrlist* al, uint64_t options, char* out)
+static uint32_t pack_entry(int dirfd, const struct linux_stat* dir_st, unsigned long long mount_id, const char* dir_path,
+	const char* name, const struct xnu_attrlist* al, uint64_t options, char* out)
 {
 	struct linux_stat st;
 	uint32_t size;
@@ -53,6 +78,7 @@ static uint32_t pack_entry(int dirfd, const struct linux_stat* dir_st, unsigned 
 			.mount_id = mount_id
 		};
 		size = attrlist_pack(al, options, &obj, out);
+		note(dir_path, name, &st);
 	}
 
 	uint32_t padded = (size + 7) & ~7;
@@ -88,6 +114,21 @@ long sys_getattrlistbulk(int dirfd, struct xnu_attrlist* alist, void* attributeB
 	if ((dir_st.st_mode & LINUX_S_IFMT) != LINUX_S_IFDIR)
 		return -ENOTDIR;
 
+	// the directory's path, when IDs are handed out: enumerating a directory is where CFURL and LaunchServices get most
+	// of theirs
+	char dir_path[NOTED_PATH_MAX], proc[32];
+	const char* noted_in = 0;
+	if (alist->commonattr & (ATTR_CMN_OBJID | ATTR_CMN_FILEID))
+	{
+		__simple_sprintf(proc, "/proc/self/fd/%d", dirfd);
+		int n = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, proc, dir_path, sizeof(dir_path) - 1);
+		if (n > 0 && n < (int) sizeof(dir_path) - 1 && dir_path[0] == '/')
+		{
+			dir_path[n] = '\0';
+			noted_in = dir_path;
+		}
+	}
+
 	unsigned long long mount_id = 0;
 	if ((alist->commonattr & ATTR_CMN_FSID) || (alist->forkattr & ATTR_CMNEXT_REALFSID))
 		mounts_id(dirfd, "", LINUX_AT_EMPTY_PATH, &mount_id);
@@ -110,7 +151,7 @@ long sys_getattrlistbulk(int dirfd, struct xnu_attrlist* alist, void* attributeB
 			uint32_t size = 0;
 
 			if (!(d->d_name[0] == '.' && (d->d_name[1] == 0 || (d->d_name[1] == '.' && d->d_name[2] == 0))))
-				size = pack_entry(dirfd, &dir_st, mount_id, d->d_name, alist, options, entry);
+				size = pack_entry(dirfd, &dir_st, mount_id, noted_in, d->d_name, alist, options, entry);
 			if (size > bufferSize - used)
 			{
 				// the rest are for the next call: the directory's offset goes back to the first of them
