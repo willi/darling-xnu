@@ -32,7 +32,9 @@
 // Binds of one file system into the process's mount namespace are one volume (one device): a search starts at the
 // mount the ID's hint names, then the others, in mountinfo's order. A bind's own objects are found in it as long as
 // binds of one file system don't overlap: otherwise another process may be given the other bind's path to an object
-// (one that's read-only, say).
+// (one that's read-only, say). A search keeps to the object's device, not to one mount: it goes into a bind of the same
+// file system nested in the one it searches, and searches that bind again from its own root. That's correct, only
+// slower.
 //
 // Object ID 2 is the volume's root, as XNU's VFS_ROOT(), unless the Linux file system has another object there.
 //
