@@ -24,21 +24,84 @@ struct slot
 
 static struct slot slots[SLOTS];
 
-static struct slot* slot_for(unsigned long long dev, unsigned long long ino)
+// objects found not to be there, for ABSENT_NS: a stale ID asked for again (LaunchServices' records of an earlier boot)
+// isn't searched for each time. A note of the object clears its entry; the one wrong answer left is "not there" for an
+// object another process made in the last ABSENT_NS.
+#define ABSENT_SLOTS 16
+#define ABSENT_NS 2000000000ll
+
+struct absent
 {
-	unsigned long long h = (ino ^ (dev << 17) ^ (dev >> 7)) * 0x9E3779B97F4A7C15ull;
-	return &slots[(h >> 58) % SLOTS];
+	int busy;
+	unsigned long long dev, ino;
+	long long until;
+};
+
+static struct absent absents[ABSENT_SLOTS];
+
+static struct slot* slot_for(unsigned long long dev, unsigned long long ino);
+
+static unsigned hash(unsigned long long dev, unsigned long long ino)
+{
+	return ((ino ^ (dev << 17) ^ (dev >> 7)) * 0x9E3779B97F4A7C15ull) >> 58;
 }
 
-static int take(struct slot* s)
+static int take(int* busy)
 {
 	int free = 0;
-	return __atomic_compare_exchange_n(&s->busy, &free, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+	return __atomic_compare_exchange_n(busy, &free, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 }
 
-static void give(struct slot* s)
+static void give(int* busy)
 {
-	__atomic_store_n(&s->busy, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(busy, 0, __ATOMIC_RELEASE);
+}
+
+static long long now_ns(void)
+{
+	struct { long tv_sec, tv_nsec; } ts;
+	if (LINUX_SYSCALL(__NR_clock_gettime, 1 /* CLOCK_MONOTONIC */, &ts) < 0)
+		return 0;
+	return ts.tv_sec * 1000000000ll + ts.tv_nsec;
+}
+
+void fileid_cache_note_absent(unsigned long long dev, unsigned long long ino)
+{
+	struct absent* a = &absents[hash(dev, ino) % ABSENT_SLOTS];
+	long long t = now_ns();
+	if (!t || !take(&a->busy))
+		return;
+	a->dev = dev;
+	a->ino = ino;
+	a->until = t + ABSENT_NS;
+	give(&a->busy);
+}
+
+int fileid_cache_absent(unsigned long long dev, unsigned long long ino)
+{
+	struct absent* a = &absents[hash(dev, ino) % ABSENT_SLOTS];
+	int found = 0;
+	long long t = now_ns();
+	if (!t || !take(&a->busy))
+		return 0;
+	found = a->until && a->dev == dev && a->ino == ino && t < a->until;
+	give(&a->busy);
+	return found;
+}
+
+static void forget_absent(unsigned long long dev, unsigned long long ino)
+{
+	struct absent* a = &absents[hash(dev, ino) % ABSENT_SLOTS];
+	if (!take(&a->busy))
+		return;
+	if (a->dev == dev && a->ino == ino)
+		a->until = 0;
+	give(&a->busy);
+}
+
+static struct slot* slot_for(unsigned long long dev, unsigned long long ino)
+{
+	return &slots[hash(dev, ino) % SLOTS];
 }
 
 void fileid_cache_note(unsigned long long dev, unsigned long long ino, const char* linux_path)
@@ -52,14 +115,15 @@ void fileid_cache_note(unsigned long long dev, unsigned long long ino, const cha
 	if (n >= PATH_SIZE)
 		return;
 
+	forget_absent(dev, ino);
 	struct slot* s = slot_for(dev, ino);
-	if (!take(s))
+	if (!take(&s->busy))
 		return;
 	s->dev = dev;
 	s->ino = ino;
 	for (unsigned long i = 0; i <= n; i++)
 		s->path[i] = linux_path[i];
-	give(s);
+	give(&s->busy);
 }
 
 int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linux_path, unsigned long size)
@@ -67,7 +131,7 @@ int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linu
 	struct slot* s = slot_for(dev, ino);
 	int found = 0;
 
-	if (!take(s))
+	if (!take(&s->busy))
 		return 0;
 	if (s->path[0] && s->dev == dev && s->ino == ino)
 	{
@@ -80,7 +144,7 @@ int fileid_cache_find(unsigned long long dev, unsigned long long ino, char* linu
 			found = 1;
 		}
 	}
-	give(s);
+	give(&s->busy);
 	if (!found)
 		return 0;
 

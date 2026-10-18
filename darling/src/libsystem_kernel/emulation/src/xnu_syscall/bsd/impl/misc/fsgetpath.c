@@ -4,6 +4,8 @@
 #include <sys/errno.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/simple.h>
+#include <darling/emulation/conversion/duct_errno.h>
 #include <darling/emulation/conversion/common_at.h>
 #include <darling/emulation/conversion/dirent/getdirentries.h>
 #include <darling/emulation/conversion/errno.h>
@@ -25,10 +27,16 @@
 // and the result is the path's length counting its terminating NUL.
 // Object ID 2 is the volume's root, as XNU's VFS_ROOT().
 //
-// Linux can't open a file by its inode number (open_by_handle_at() needs a file system's own handle, and
-// CAP_DAC_READ_SEARCH), so the path is the one this process last looked the object up by (fileid_cache.h), if it still
-// leads there, or else found by searching from the roots of the mounts of the object's device: into directories on
-// that device (on btrfs, into its subvolumes too), symlinks not followed, unreadable directories passed over.
+// Linux opens a file by inode number only with a file system's own handle and CAP_DAC_READ_SEARCH
+// (open_by_handle_at()), so the path is:
+// - the one this process last looked the object up by (fileid_cache.h), if it still leads there;
+// - on ext4, with that capability (root's, in a container), open_by_handle_at() with a handle of the inode number and
+//   any generation: no such inode (ESTALE) is ENOENT at once, and an object whose path Linux knows (a directory, a
+//   file looked up lately) is found by it;
+// - else found by searching from the roots of the mounts of the object's device: into directories on that device (on
+//   btrfs, into its subvolumes too), symlinks not followed, unreadable directories passed over. Each search is logged
+//   (kprintf, "fsgetpath: searched"), with what it took.
+// What wasn't there is remembered for a while (fileid_cache_absent()).
 //
 // That finds the objects of a volume when they report the device of a mount (fsgetpath_volume_searchable(), which
 // decides getattrlist()'s VOL_CAP_FMT_PATH_FROM_ID). Most file systems' do. An overlay's do when its layers are on one
@@ -57,6 +65,10 @@
 #define BTRFS_FIRST_FREE_OBJECTID 256
 // how many directories of an overlay are looked into for a file, to see which device its files report
 #define OVERLAY_SAMPLE_DIRS 64
+#define LINUX_EXT4_SUPER_MAGIC 0xEF53
+// include/linux/exportfs.h: a 32-bit inode number and its generation, which ext4 takes 0 of as any
+#define LINUX_FILEID_INO32_GEN 1
+#define LINUX_O_PATH 010000000
 
 // the search: a directory per level being read, each with its own getdents64() buffer, in one mapping
 #define DEPTH_MAX 128
@@ -73,6 +85,8 @@ struct search
 	unsigned long long dev, objid;
 	// on btrfs, from mounts of other devices: into subvolumes; whether one of dev was found
 	int subvolumes, found_dev;
+	// directories the search read
+	long dirs;
 	char path[VCHROOT_PATH_MAX]; // a Linux path; the one found, once found
 	// the path found as the process sees it: outside the prefix, under /Volumes/SystemRoot, so longer than path can be
 	char seen[VCHROOT_PATH_MAX + sizeof("/Volumes/SystemRoot")];
@@ -183,9 +197,85 @@ static int search_mount(const char* mount_point, void* ctx)
 			continue;
 		}
 		depth++;
+		s->dirs++;
 		s->levels[depth] = (struct level) { .fd = sub, .pathlen = end };
 	}
 	return 0;
+}
+
+// whether the object is on the file system mounted at mount_point, by open_by_handle_at(): 1 and its path in s->path,
+// 2 when it is but Linux doesn't know a path to it through this mount, 0 when no such object is there, or -1 when that
+// can't be told (not ext4, no CAP_DAC_READ_SEARCH)
+static int probe_at(struct search* s, const char* mount_point)
+{
+	struct
+	{
+		uint32_t handle_bytes;
+		int handle_type;
+		uint32_t ino, generation;
+	} handle = { 8, LINUX_FILEID_INO32_GEN, (uint32_t) s->objid, 0 };
+	struct linux_stat st;
+	char proc[32];
+
+	if (s->objid > 0xFFFFFFFFull)
+		return -1;
+	// not O_PATH: open_by_handle_at() wants a descriptor it can use (EBADF otherwise)
+	int mfd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, mount_point, LINUX_O_RDONLY | LINUX_O_DIRECTORY | LINUX_O_CLOEXEC, 0);
+	if (mfd < 0)
+		return -1;
+	if (fs_type(mfd) != LINUX_EXT4_SUPER_MAGIC)
+	{
+		close_internal(mfd);
+		return -1;
+	}
+	int fd = LINUX_SYSCALL(__NR_open_by_handle_at, mfd, &handle, LINUX_O_PATH | LINUX_O_CLOEXEC);
+	close_internal(mfd);
+	if (fd == -LINUX_ESTALE || fd == -LINUX_ENOENT)
+		return 0;
+	if (fd < 0)
+		return -1;
+
+	__simple_sprintf(proc, "/proc/self/fd/%d", fd);
+	long n = LINUX_SYSCALL(__NR_readlinkat, LINUX_AT_FDCWD, proc, s->path, sizeof(s->path) - 1);
+	close_internal(fd);
+	if (n <= 0 || s->path[0] != '/')
+		return 2;
+	s->path[n] = '\0';
+	// a path Linux has for it, if it leads there (a disconnected one is just "/", or a name)
+	if (LINUX_SYSCALL(__NR_fstatat64, LINUX_AT_FDCWD, s->path, &st, LINUX_AT_SYMLINK_NOFOLLOW) < 0 ||
+		(uint32_t) st.st_dev != s->dev || st.st_ino != s->objid)
+		return 2;
+	return 1;
+}
+
+// probe_at() through each of the device's mounts, until one has a path to it
+struct probe
+{
+	struct search* s;
+	int there;
+};
+
+static int probe_root(const char* mount_point, void* ctx)
+{
+	struct probe* p = ctx;
+	p->there = probe_at(p->s, mount_point);
+	// a path, or not there (one file system: the same answer through any mount), or can't tell
+	return p->there != 2;
+}
+
+static int probe(struct search* s)
+{
+	struct probe p = { .s = s, .there = -1 };
+	mounts_each_root(s->dev, probe_root, &p);
+	return p.there;
+}
+
+static long long now_ms(void)
+{
+	struct { long tv_sec, tv_nsec; } ts;
+	if (LINUX_SYSCALL(__NR_clock_gettime, 1 /* CLOCK_MONOTONIC */, &ts) < 0)
+		return 0;
+	return ts.tv_sec * 1000ll + ts.tv_nsec / 1000000;
 }
 
 // the volume's first mount point, a Linux path
@@ -223,12 +313,32 @@ static long find_object(struct search* s)
 	}
 	if (s->objid == ROOT_OBJID)
 		return 0;
+	if (fileid_cache_absent(s->dev, s->objid))
+		return -ENOENT;
 
+	int there = probe(s);
+	if (there == 0)
+	{
+		fileid_cache_note_absent(s->dev, s->objid);
+		return -ENOENT;
+	}
+	if (there == 1)
+	{
+		fileid_cache_note(s->dev, s->objid, s->path);
+		return 0;
+	}
+
+	long long t0 = now_ms();
 	ret = mounts_each_root(s->dev, search_mount, s);
+	__simple_kprintf("fsgetpath: searched device %llx for %llu: %s, %ld directories, %lld ms\n", s->dev, s->objid,
+		ret > 0 ? "found" : ret == 0 ? "not there" : "error", s->dirs, now_ms() - t0);
 	if (ret < 0)
 		return ret;
 	if (ret == 0)
+	{
+		fileid_cache_note_absent(s->dev, s->objid);
 		return -ENOENT;
+	}
 	fileid_cache_note(s->dev, s->objid, s->path);
 	return 0;
 }
