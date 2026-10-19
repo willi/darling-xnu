@@ -12,7 +12,9 @@
 
 long sys_pthread_canceled(int action)
 {
-	if (action == 0 && !uses_threads())
+	// MEASUREMENT ONLY, never merged: action 0 answers "not canceled" here instead of asking darlingserver, which
+	// answers -ENOSYS (call.cpp's PthreadCanceled is a stub), so both callers see what they see today, without the RPC
+	if (action == 0)
 		return -EINVAL;
 
 	int ret = dserver_rpc_pthread_canceled(action);
