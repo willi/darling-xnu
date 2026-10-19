@@ -47,6 +47,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/getrusage.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/iopolicysys.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/mac_syscall.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/misc/memorystatus_control.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/ptrace.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/reboot.h>
@@ -471,6 +472,7 @@ void* __bsd_syscall_table[600] = {
 	[430] = sys_fileport_makeport,
 	[431] = sys_fileport_makefd,
 	[432] = sys_audit_session_port,
+	[440] = sys_memorystatus_control,
 	[441] = sys_guarded_open_np,
 	[442] = sys_guarded_close_np,
 	[443] = sys_guarded_kqueue_np,
