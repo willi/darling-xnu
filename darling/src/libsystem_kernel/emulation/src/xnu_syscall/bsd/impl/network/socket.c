@@ -28,8 +28,10 @@ long sys_socket(int domain, int type, int protocol)
 			linux_domain = LINUX_PF_INET6; break;
 		case PF_ROUTE:
 			return route_socket_create(type, protocol);
+		// a domain Darling has no sockets for (PF_SYSTEM's kernel controls and events, PF_NDRV, ...; XNU has them): the
+		// answer socreate_internal() gives for a domain XNU lacks, EAFNOSUPPORT
 		default:
-			return -EINVAL;
+			return -EAFNOSUPPORT;
 	}
 
 #ifdef __NR_socketcall
