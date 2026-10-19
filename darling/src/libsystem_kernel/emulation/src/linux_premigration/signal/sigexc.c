@@ -220,8 +220,11 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 
 	int status = dserver_rpc_interrupt_enter();
 
-	// darlingserver saw this thread die (its checkout) before it got to the interrupt_enter: there's nothing to suspend
-	// or run, and the call the signal interrupted takes its reply, which comes after this one
+	// darlingserver saw this thread die (its checkout) with this interrupt_enter queued behind the checkout, and answered
+	// it first: there's nothing to suspend or run, and the checkout takes its own reply, which comes next. Only that
+	// queued case is covered here. An interrupt_enter that reaches darlingserver after the checkout's reply has gone out
+	// gets that reply, which then goes back to a dead thread, and the checkout waits for ever: mldr blocking
+	// darlingserver's signals before the checkout is the fix, and this is a defence behind it.
 	if (status == -LINUX_ESRCH)
 		return;
 
@@ -350,6 +353,8 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
 
 	int status = dserver_rpc_interrupt_enter();
 
+	// no ESRCH case as sigrt_handler() has: darlingserver answers so only an interrupt_enter queued behind the
+	// thread's checkout, and mldr blocks every signal before the checkout
 	if (status != 0) {
 		__simple_printf("*** dserver_rpc_interrupt_enter failed with code %d ***\n", status);
 		__simple_abort();
