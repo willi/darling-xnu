@@ -20,6 +20,8 @@
 #include <darling/emulation/common/simple.h>
 #include <darling/emulation/conversion/duct_errno.h>
 
+#include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+
 #include <darlingserver/rpc.h>
 
 // Support for Darwin debugging.
@@ -28,6 +30,7 @@
 
 static volatile bool am_i_ptraced = false;
 static void handle_rt_signal(int signum);
+static void handle_cancel_signal(void);
 static void sigexc_fake_suspend(struct linux_ucontext* ctxt);
 extern void sig_restorer(void);
 extern int getpid(void);
@@ -83,6 +86,7 @@ void sigexc_setup1(void)
 {
 	handle_rt_signal(SIGNAL_SIGEXC_SUSPEND);
 	handle_rt_signal(SIGNAL_S2C);
+	handle_cancel_signal();
 }
 
 void sigexc_setup2(void)
@@ -90,6 +94,7 @@ void sigexc_setup2(void)
 	linux_sigset_t set;
 	set = (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
 	set |= (1ull << (SIGNAL_S2C-1));
+	set |= (1ull << (SIGNAL_PTHREAD_CANCEL-1));
 
 	LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
 		&set, NULL, sizeof(linux_sigset_t));
@@ -121,6 +126,46 @@ static void handle_rt_signal(int signum)
 	//char buf[128];
 	//__simple_sprintf(xyzbuf, "Setting handler for RT signal %d: %d", signum, rv);
 	//external/lkm_call(0x1028, buf);
+}
+
+#if defined(__x86_64__)
+// linux-syscall.S's cancelable syscall entry
+extern char __darling_cp_begin[], __darling_cp_end[], __darling_cp_cancel[];
+#endif
+
+// darlingserver's pthread_markcancel, on the thread it marks: XNU's __pthread_markcancel (bsd/kern/kern_sig.c
+// 1009-1015) for that thread. The mark is set unless the thread was marked already or has acted on one. Then, unless
+// cancellation is disabled, thread_abort_safely's part: a thread in a cancelable syscall's blocking call
+// (linux_syscall_cp) leaves it with EINTR, which its cerror acts on. Elsewhere the thread is not in a cancellation
+// point (XNU's UT_NOTCANCELPT), and the next one acts on the mark.
+static void cancel_handler(int signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
+{
+	unsigned long flags = __darling_cancel_flags();
+
+	if (flags & (DARLING_UT_CANCEL | DARLING_UT_CANCELED))
+		return;
+	__darling_cancel_flags_set(DARLING_UT_CANCEL);
+	if (flags & DARLING_UT_CANCELDISABLE)
+		return;
+
+#if defined(__x86_64__)
+	char* pc = (char*) ctxt->uc_mcontext.gregs.rip;
+	if (pc >= __darling_cp_begin && pc < __darling_cp_end)
+		ctxt->uc_mcontext.gregs.rip = (unsigned long) __darling_cp_cancel;
+#endif
+}
+
+// SA_RESTART, so that the syscalls the signal interrupts outside a cancellation point carry on as if it hadn't come
+static void handle_cancel_signal(void)
+{
+	struct linux_sigaction sa;
+
+	sa.sa_sigaction = (linux_sig_handler*) cancel_handler;
+	sa.sa_mask = (1ull << (SIGNAL_SIGEXC_SUSPEND-1)) | (1ull << (SIGNAL_PTHREAD_CANCEL-1));
+	sa.sa_flags = LINUX_SA_RESTORER | LINUX_SA_SIGINFO | LINUX_SA_RESTART | LINUX_SA_ONSTACK;
+	sa.sa_restorer = sig_restorer;
+
+	LINUX_SYSCALL(__NR_rt_sigaction, SIGNAL_PTHREAD_CANCEL, &sa, NULL, sizeof(sa.sa_mask));
 }
 
 void sigexc_setup(void)
