@@ -87,6 +87,7 @@ struct linux_tcp_info_full {
 	uint32_t tcpi_rcv_ooopack;
 
 	uint32_t tcpi_snd_wnd;
+	uint32_t tcpi_rcv_wnd;	// Linux 6.2 on
 };
 
 // Linux's TCPI_OPT_* bits for these are XNU's
@@ -115,8 +116,8 @@ static uint8_t tcp_state(uint8_t linux_state)
 	}
 }
 
-// what Linux knows of the connection, and the bytes in its send buffer
-static long read_linux_tcp_info(int fd, struct linux_tcp_info_full* info, uint32_t* sbbytes)
+// what Linux knows of the connection (`got`: how much of it this kernel has), and the bytes in its send buffer
+static long read_linux_tcp_info(int fd, struct linux_tcp_info_full* info, unsigned int* got, uint32_t* sbbytes)
 {
 	unsigned int len = sizeof(*info);
 	int outq = 0;
@@ -126,6 +127,7 @@ static long read_linux_tcp_info(int fd, struct linux_tcp_info_full* info, uint32
 	ret = linux_getsockopt(fd, LINUX_SOL_TCP, LINUX_TCP_INFO, info, &len);
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
+	*got = len;
 
 	// unsent and unacknowledged bytes, as XNU's so_snd.sb_cc; a listening socket has none
 	if (LINUX_SYSCALL(__NR_ioctl, fd, LINUX_SIOCOUTQ, &outq) < 0)
@@ -143,7 +145,7 @@ static uint32_t bytes_of_segments(uint32_t segments, uint32_t mss)
 // XNU's tcp_fill_info(), from Linux's: times in ms (Linux's are µs), windows and thresholds in bytes (Linux's are in
 // segments). Linux has no counterpart for the sequence numbers, the interface and its kind, the flow hash, the
 // connectivity probes or the TFO and ECN details, so they are 0.
-static void fill_info(const struct linux_tcp_info_full* l, uint32_t sbbytes, struct xnu_tcp_info* ti)
+static void fill_info(const struct linux_tcp_info_full* l, unsigned int got, uint32_t sbbytes, struct xnu_tcp_info* ti)
 {
 	uint32_t mss = l->tcpi_snd_mss;
 
@@ -179,8 +181,11 @@ static void fill_info(const struct linux_tcp_info_full* l, uint32_t sbbytes, str
 	ti->tcpi_snd_cwnd = bytes_of_segments(l->tcpi_snd_cwnd, mss);
 	ti->tcpi_snd_sbbytes = sbbytes;
 
-	// (Linux's receive space, its estimate of the window the connection needs, for what's left of the advertised one)
-	ti->tcpi_rcv_space = l->tcpi_rcv_space;
+	// what's left of the advertised window (rcv_adv - rcv_nxt): Linux's last advertised one, which differs only by what
+	// has come in since. A kernel before 6.2 hasn't got it: then its receive space, its estimate of the window the
+	// connection needs.
+	ti->tcpi_rcv_space = (got >= offsetof(struct linux_tcp_info_full, tcpi_rcv_wnd) + sizeof(l->tcpi_rcv_wnd))
+		? l->tcpi_rcv_wnd : l->tcpi_rcv_space;
 	ti->tcpi_snd_wnd = l->tcpi_snd_wnd;
 
 	ti->tcpi_txpackets = l->tcpi_segs_out;
@@ -240,6 +245,7 @@ long tcp_info_option(int fd, int optname, void* optval, int* optlen)
 	struct xnu_tcp_info ti;
 	struct xnu_tcp_connection_info tci;
 	uint32_t sbbytes;
+	unsigned int got;
 	const void* value;
 	int size, n;
 	long ret;
@@ -248,11 +254,11 @@ long tcp_info_option(int fd, int optname, void* optval, int* optlen)
 	if (optlen == NULL)
 		return -EFAULT;
 
-	ret = read_linux_tcp_info(fd, &l, &sbbytes);
+	ret = read_linux_tcp_info(fd, &l, &got, &sbbytes);
 	if (ret < 0)
 		return ret;
 
-	fill_info(&l, sbbytes, &ti);
+	fill_info(&l, got, sbbytes, &ti);
 	if (optname == BSD_TCP_CONNECTION_INFO)
 	{
 		connection_fill_info(&ti, &tci);
