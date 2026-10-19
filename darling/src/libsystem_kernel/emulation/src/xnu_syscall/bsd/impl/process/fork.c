@@ -25,7 +25,7 @@
 #include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
 
-#include <darling/emulation/common/tsd.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
 #include <darlingserver/rpc.h>
 
@@ -123,7 +123,7 @@ long sys_fork_special_ports_locked(void)
 		purgeable_atfork_child();
 		fileid_cache_atfork_child();
 		// the child's thread is a new one, whose cancellation flags start clear (XNU's uthread_alloc zeroes them)
-		_pthread_setspecific_direct(__PTK_DARLING_CANCEL, 0);
+		__darling_cancel_flags_clear(~0ul);
 
 #ifndef VARIANT_DYLD
 		// for tests: see __darling_fork_stop_child

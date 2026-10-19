@@ -4,8 +4,10 @@
 #include <sys/errno.h>
 
 #include <darling/emulation/common/base.h>
+#include <darling/emulation/common/tsd.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
+_Static_assert(__DARLING_CANCEL_KEY == __PTK_DARLING_CANCEL, "cancelable.h's slot");
 // linux-syscall.S's cancelable entry reads the flags at %gs:1632 and tests them as __darling_cancel_pending() does
 _Static_assert(__PTK_DARLING_CANCEL * sizeof(void*) == 1632, "linux-syscall.S's CANCEL_FLAGS offset");
 _Static_assert(DARLING_UT_CANCEL == 0x8 && (DARLING_UT_CANCELDISABLE | DARLING_UT_CANCEL | DARLING_UT_CANCELED) == 0x38,

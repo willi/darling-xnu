@@ -3,7 +3,6 @@
 
 #include <sys/errno.h>
 
-#include <darling/emulation/common/tsd.h>
 
 // A thread's cancellation state: XNU's uthread flags (bsd/sys/user.h 347-349), in the thread's own TSD slot
 // (__PTK_DARLING_CANCEL) instead of the kernel, so that a cancellation point reads them without asking darlingserver.
@@ -13,11 +12,16 @@
 #define DARLING_UT_CANCELED      0x10 // acted on: the thread is exiting
 #define DARLING_UT_CANCELDISABLE 0x20
 
-#define __darling_cancel_slot (*(unsigned long*)(__PTK_DARLING_CANCEL * sizeof(void*)))
+// __PTK_DARLING_CANCEL (common/tsd.h; pthread_canceled.c checks it), not included here: libpthread's tsd_private.h
+// brings string.h's fortified macros into every file that has a cancellation point
+#define __DARLING_CANCEL_KEY 204
+#define __darling_cancel_slot (*(unsigned long*)(__DARLING_CANCEL_KEY * sizeof(void*)))
 
 static inline unsigned long __darling_cancel_flags(void)
 {
-	return (unsigned long)_pthread_getspecific_direct(__PTK_DARLING_CANCEL);
+	unsigned long flags;
+	__asm__ volatile("mov %%gs:%1, %0" : "=r" (flags) : "m" (__darling_cancel_slot));
+	return flags;
 }
 
 static inline void __darling_cancel_flags_set(unsigned long bits)
