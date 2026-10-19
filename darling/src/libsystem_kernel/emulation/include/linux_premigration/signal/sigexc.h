@@ -10,10 +10,9 @@
 // Uses one of the below magic values to toggle the debugging state
 #define SIGNAL_SIGEXC_SUSPEND	LINUX_SIGRTMIN
 #define SIGNAL_S2C (LINUX_SIGRTMIN + 1)
-// darlingserver's pthread_markcancel (bsdthread/cancelable.h, sigexc.c). glibc's SIGRTMIN, so LINUX_SIGRTMIN, is 34: glibc
-// keeps 32 and 33 for itself (mldr is glibc's), SIGEXC_SUSPEND is 34 and S2C 35. darlingserver sends 36 by number.
-#define SIGNAL_PTHREAD_CANCEL 36
-_Static_assert(SIGNAL_PTHREAD_CANCEL > SIGNAL_S2C && SIGNAL_PTHREAD_CANCEL <= LINUX_SIGRTMAX, "a real-time signal of its own");
+// darlingserver's pthread_markcancel (bsdthread/cancelable.h, sigexc.c); darlingserver's call.cpp sends the same
+#define SIGNAL_PTHREAD_CANCEL (LINUX_SIGRTMIN + 2)
+_Static_assert(SIGNAL_PTHREAD_CANCEL <= LINUX_SIGRTMAX, "a real-time signal of its own");
 
 void sigexc_setup(void);
 
