@@ -125,11 +125,11 @@ static long read_linux_tcp_info(int fd, struct linux_tcp_info_full* info, unsign
 
 	memset(info, 0, sizeof(*info));
 	ret = linux_getsockopt(fd, LINUX_SOL_TCP, LINUX_TCP_INFO, info, &len);
+	// Linux answers a socket that isn't TCP with EOPNOTSUPP (95), which comes out as EOPNOTSUPP (102), as XNU's
+	// uipc_ctloutput() answers a local socket (bsd/kern/uipc_usrreq.c:803). XNU answers a UDP or raw IP socket
+	// EINVAL (ip_ctloutput(), bsd/netinet/ip_output.c:2252; rip_ctloutput(), raw_ip.c:742), which this doesn't tell
+	// apart.
 	if (ret < 0)
-		// Linux answers a socket that isn't TCP with EOPNOTSUPP (95), which comes out as EOPNOTSUPP (102), as XNU's
-		// uipc_ctloutput() answers a local socket (bsd/kern/uipc_usrreq.c:803). XNU answers a UDP or raw IP socket
-		// EINVAL (ip_ctloutput(), bsd/netinet/ip_output.c:2252; rip_ctloutput(), raw_ip.c:742), which this doesn't tell
-		// apart.
 		return errno_linux_to_bsd(ret);
 	*got = len;
 
