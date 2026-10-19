@@ -17,6 +17,7 @@ long sys_memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, voi
 	// memorystatus_control()'s own error, or an RPC failure: a negative Linux errno either way
 	// Linux has one value for ENOTSUP and EOPNOTSUPP (95), which errno_linux_to_bsd() takes for EOPNOTSUPP (102):
 	// memorystatus_control() answers ENOTSUP (45), as XNU's does, and RunningBoard expects that one
+	// (errno_linux_to_bsd() does this for every call: once it tells the two apart per call, this case goes)
 	if (code == -LINUX_EOPNOTSUPP)
 		return -ENOTSUP;
 	if (code != 0)
