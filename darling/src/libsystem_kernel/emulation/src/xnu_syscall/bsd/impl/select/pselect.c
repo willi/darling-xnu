@@ -7,13 +7,20 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
+static long pselect_body(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout, const sigset_t* mask, int cp);
+
 long sys_pselect(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout, const sigset_t* mask)
 {
 	CANCELATION_POINT();
-	return sys_pselect_nocancel(nfds, rfds, wfds, efds, timeout, mask);
+	return pselect_body(nfds, rfds, wfds, efds, timeout, mask, 1);
 }
 
 long sys_pselect_nocancel(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout, const sigset_t* mask)
+{
+	return pselect_body(nfds, rfds, wfds, efds, timeout, mask, 0);
+}
+
+static long pselect_body(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout, const sigset_t* mask, int cp)
 {
 	int ret;
 	struct linux_timeval ltv;
@@ -34,7 +41,7 @@ long sys_pselect_nocancel(int nfds, void* rfds, void* wfds, void* efds, struct b
 		data[1] = 65/8; // _NSIG / 8
 	}
 
-	ret = LINUX_SYSCALL(__NR_pselect6, nfds, rfds, wfds, efds,
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_pselect6, nfds, rfds, wfds, efds,
 			(timeout != NULL) ? &ltv : NULL,
 			(mask != NULL) ? data : NULL);
 

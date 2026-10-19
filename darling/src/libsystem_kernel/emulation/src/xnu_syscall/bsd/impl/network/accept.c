@@ -14,21 +14,28 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
 
+static long accept_body(int fd, void* from, int* socklen, int cp);
+
 long sys_accept(int fd, void* from, int* socklen)
 {
 	CANCELATION_POINT();
-	return sys_accept_nocancel(fd, from, socklen);
+	return accept_body(fd, from, socklen, 1);
 }
 
 long sys_accept_nocancel(int fd, void* from, int* socklen)
+{
+	return accept_body(fd, from, socklen, 0);
+}
+
+static long accept_body(int fd, void* from, int* socklen, int cp)
 {
 	int ret;
 	struct sockaddr_fixup* fixed;
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_ACCEPT, ((long[6]) { fd, from, socklen }));
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_ACCEPT, ((long[6]) { fd, from, socklen }));
 #else
-	ret = LINUX_SYSCALL(__NR_accept, fd, from, socklen);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_accept, fd, from, socklen);
 #endif
 
 	if (ret < 0)

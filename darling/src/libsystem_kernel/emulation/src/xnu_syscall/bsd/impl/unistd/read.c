@@ -10,17 +10,24 @@
 
 #define LINUX_TCGETA 0x5405
 
+static long read_body(int fd, void* mem, int len, int cp);
+
 long sys_read(int fd, void* mem, int len)
 {
 	CANCELATION_POINT();
-	return sys_read_nocancel(fd, mem, len);
+	return read_body(fd, mem, len, 1);
 }
 
 long sys_read_nocancel(int fd, void* mem, int len)
 {
+	return read_body(fd, mem, len, 0);
+}
+
+static long read_body(int fd, void* mem, int len, int cp)
+{
 	int ret;
 
-	ret = LINUX_SYSCALL3(__NR_read, fd, mem, len);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_read, fd, mem, len);
 	if (ret < 0)
 	{
 		// When the slave side of a PTY is closed, Linux produces -EIO on the master side.

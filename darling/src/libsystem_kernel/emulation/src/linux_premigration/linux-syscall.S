@@ -74,3 +74,50 @@ _linux_syscall:
 #	error Missing assembly!
 
 #endif
+
+// linux_syscall for a cancelable syscall's blocking call (bsdthread/cancelable.h): the same, with XNU's test for a
+// cancellation to act on (bsd/kern/kern_sig.c 977) in the range [___darling_cp_begin, ___darling_cp_end), which ends
+// right after the syscall instruction. The cancel signal's handler (sigexc.c) moves a thread it finds in that range to
+// ___darling_cp_cancel, which returns -EINTR: whether the thread is before the syscall or blocked in it (the kernel
+// rewinds an interrupted syscall to its instruction, to restart it: the handler is SA_RESTART). A finished syscall is
+// past the range, and its result stands. CANCEL_FLAGS and CANCEL_TEST are pthread_canceled.c's static asserts.
+#define CANCEL_FLAGS	1632	// __PTK_DARLING_CANCEL's TSD slot, from %gs
+#define CANCEL_TEST	0x38	// DARLING_UT_CANCELDISABLE | DARLING_UT_CANCEL | DARLING_UT_CANCELED
+#define CANCEL_ACT	0x8	// DARLING_UT_CANCEL alone
+#define LINUX_EINTR	4
+
+#if defined(__x86_64__)
+
+.globl _linux_syscall_cp
+.private_extern _linux_syscall_cp
+.globl ___darling_cp_begin
+.private_extern ___darling_cp_begin
+.globl ___darling_cp_end
+.private_extern ___darling_cp_end
+.globl ___darling_cp_cancel
+.private_extern ___darling_cp_cancel
+
+_linux_syscall_cp:
+	movl	8(%rsp), %eax
+	movq	%rcx, %r10
+___darling_cp_begin:
+	movq	%gs:CANCEL_FLAGS, %r11
+	andq	$CANCEL_TEST, %r11
+	cmpq	$CANCEL_ACT, %r11
+	je	___darling_cp_cancel
+	syscall
+___darling_cp_end:
+	ret
+___darling_cp_cancel:
+	movq	$-LINUX_EINTR, %rax
+	ret
+
+#elif defined(__i386__)
+
+// only the test before the syscall (CANCELATION_POINT); a blocked syscall isn't interrupted
+.globl _linux_syscall_cp
+.private_extern _linux_syscall_cp
+_linux_syscall_cp:
+	jmp	_linux_syscall
+
+#endif

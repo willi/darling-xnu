@@ -13,15 +13,24 @@
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 
+static long recvfrom_body(int fd, void* buf, unsigned long len,
+		int flags, void* from, int* socklen, int cp);
+
 long sys_recvfrom(int fd, void* buf, unsigned long len,
 		int flags, void* from, int* socklen)
 {
 	CANCELATION_POINT();
-	return sys_recvfrom_nocancel(fd, buf, len, flags, from, socklen);
+	return recvfrom_body(fd, buf, len, flags, from, socklen, 1);
 }
 
 long sys_recvfrom_nocancel(int fd, void* buf, unsigned long len,
 		int flags, void* from, int* socklen)
+{
+	return recvfrom_body(fd, buf, len, flags, from, socklen, 0);
+}
+
+static long recvfrom_body(int fd, void* buf, unsigned long len,
+		int flags, void* from, int* socklen, int cp)
 {
 	int ret, linux_flags;
 	struct sockaddr_fixup* fixed;
@@ -29,10 +38,10 @@ long sys_recvfrom_nocancel(int fd, void* buf, unsigned long len,
 	linux_flags = msgflags_bsd_to_linux(flags);
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_RECVFROM, ((long[6]) { fd, buf, len,
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_RECVFROM, ((long[6]) { fd, buf, len,
 			linux_flags, from, socklen }));
 #else
-	ret = LINUX_SYSCALL(__NR_recvfrom, fd, buf, len, linux_flags, from, socklen);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_recvfrom, fd, buf, len, linux_flags, from, socklen);
 #endif
 
 	if (ret < 0)

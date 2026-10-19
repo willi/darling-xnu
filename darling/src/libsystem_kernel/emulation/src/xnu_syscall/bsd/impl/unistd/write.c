@@ -10,10 +10,12 @@
 
 #include <sys/uio.h>
 
+static long write_body(int fd, const void* mem, int len, int cp);
+
 long sys_write(int fd, const void* mem, int len)
 {
 	CANCELATION_POINT();
-	return sys_write_nocancel(fd, mem, len);
+	return write_body(fd, mem, len, 1);
 }
 
 __attribute__((visibility("default")))
@@ -24,6 +26,11 @@ long __write_for_xtrace(int fd, const void* mem, int len)
 
 
 long sys_write_nocancel(int fd, const void* mem, int len)
+{
+	return write_body(fd, mem, len, 0);
+}
+
+static long write_body(int fd, const void* mem, int len, int cp)
 {
 	int ret;
 	long route_ret;
@@ -39,7 +46,7 @@ long sys_write_nocancel(int fd, const void* mem, int len)
 			return sent < 0 ? socket_send_failed(fd, sent, 0, 0) : sent;
 	}
 
-	ret = LINUX_SYSCALL3(__NR_write, fd, mem, len);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_write, fd, mem, len);
 	if (ret < 0) {
 		// Linux raised SIGPIPE itself for its own EPIPE; a socket error made EPIPE gets XNU's (sostate.h)
 		int linux_raised = ret == -LINUX_EPIPE;

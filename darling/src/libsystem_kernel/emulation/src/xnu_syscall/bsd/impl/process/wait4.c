@@ -15,13 +15,20 @@
 
 extern int getpid(void);
 
+static long wait4_body(int pid, int* status, int options, void* rusage, int cp);
+
 long sys_wait4(int pid, int* status, int options, void* rusage)
 {
 	CANCELATION_POINT();
-	return sys_wait4_nocancel(pid, status, options, rusage);
+	return wait4_body(pid, status, options, rusage, 1);
 }
 
 long sys_wait4_nocancel(int pid, int* status, int options, void* rusage)
+{
+	return wait4_body(pid, status, options, rusage, 0);
+}
+
+static long wait4_body(int pid, int* status, int options, void* rusage, int cp)
 {
 	int ret, linux_options;
 	int mystatus;
@@ -33,7 +40,7 @@ long sys_wait4_nocancel(int pid, int* status, int options, void* rusage)
 	linux_options = waitopts_bsd_to_linux(options);
 
 restart:
-	ret = LINUX_SYSCALL(__NR_wait4, pid, status, linux_options, rusage);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_wait4, pid, status, linux_options, rusage);
 	if (ret < 0)
 		return errno_linux_to_bsd(ret);
 

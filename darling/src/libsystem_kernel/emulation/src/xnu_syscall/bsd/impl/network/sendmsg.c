@@ -15,13 +15,20 @@ extern void *malloc(__SIZE_TYPE__ size);
 extern void free(void* ptr);
 extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ len);
 
+static long sendmsg_body(int socket, const struct bsd_msghdr* msg, int flags, int cp);
+
 long sys_sendmsg(int socket, const struct bsd_msghdr* msg, int flags)
 {
 	CANCELATION_POINT();
-	return sys_sendmsg_nocancel(socket, msg, flags);
+	return sendmsg_body(socket, msg, flags, 1);
 }
 
 long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
+{
+	return sendmsg_body(socket, msg, flags, 0);
+}
+
+static long sendmsg_body(int socket, const struct bsd_msghdr* msg, int flags, int cp)
 {
 	int ret, linux_flags, local_dgram;
 	struct linux_msghdr lmsg;
@@ -84,10 +91,10 @@ long sys_sendmsg_nocancel(int socket, const struct bsd_msghdr* msg, int flags)
 	linux_flags = local_dgram_send_flags(socket, msgflags_bsd_to_linux(flags) | LINUX_MSG_NOSIGNAL, &local_dgram);
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDMSG,
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_SENDMSG,
 			((long[6]) { socket, &lmsg, linux_flags }));
 #else
-	ret = LINUX_SYSCALL(__NR_sendmsg, socket, &lmsg, linux_flags);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_sendmsg, socket, &lmsg, linux_flags);
 #endif
 
 	ret = local_dgram_send_result(local_dgram, ret);
