@@ -298,16 +298,22 @@ __attribute__((format(printf, 1, 2)))
 void __dserver_rpc_hooks_printf(const char* format, ...);
 #define dserver_rpc_hooks_printf __dserver_rpc_hooks_printf
 
-#define dserver_rpc_hooks_atomic_save_t sigset_t
+// The Linux mask, whole: a BSD sigset_t has no room for the real-time signals, darlingserver's two among them. Saved and
+// restored through sys_sigprocmask(), the mask lost their bits, which unblocked them inside their own handlers after the
+// first call: the S2C handler's sa_mask blocks both (34 and 35), the suspend handler's blocks 34, leaving 35 open on
+// purpose so a suspended thread can still serve an S2C call. A second S2C signal then nested on the signal stack, its
+// interrupt_enter took the outer handler's reply, and darlingserver dropped it when pushed back; the next ones nested
+// deeper, until the signal stack overflowed (SIGSEGV). (A second suspend could nest the same way.)
+#define dserver_rpc_hooks_atomic_save_t linux_sigset_t
 
 static void dserver_rpc_hooks_atomic_begin(dserver_rpc_hooks_atomic_save_t* atomic_save) {
 	// block standard unix signals (not real-time signals, though)
-	sigset_t set = 0x7fffffff;
-	sys_sigprocmask(SIG_BLOCK, &set, atomic_save);
+	linux_sigset_t set = 0x7fffffff;
+	LINUX_SYSCALL(__NR_rt_sigprocmask, 0 /* LINUX_SIG_BLOCK */, &set, atomic_save, sizeof(linux_sigset_t));
 };
 
 static void dserver_rpc_hooks_atomic_end(dserver_rpc_hooks_atomic_save_t* atomic_save) {
-	sys_sigprocmask(SIG_SETMASK, atomic_save, NULL);
+	LINUX_SYSCALL(__NR_rt_sigprocmask, 2 /* LINUX_SIG_SETMASK */, atomic_save, NULL, sizeof(linux_sigset_t));
 };
 
 #define dserver_rpc_hooks_get_interrupt_status() (-LINUX_EINTR)
