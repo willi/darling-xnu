@@ -299,10 +299,11 @@ void __dserver_rpc_hooks_printf(const char* format, ...);
 #define dserver_rpc_hooks_printf __dserver_rpc_hooks_printf
 
 // The Linux mask, whole: a BSD sigset_t has no room for the real-time signals, darlingserver's two among them. Saved and
-// restored through sys_sigprocmask(), the mask lost their bits, which unblocked them: in sigrt_handler (whose sa_mask
-// blocks both) after its first call, so a second S2C signal nested on the signal stack, its interrupt_enter took the
-// outer handler's reply, and darlingserver dropped it when pushed back; the next ones nested deeper, until the signal
-// stack overflowed (SIGSEGV).
+// restored through sys_sigprocmask(), the mask lost their bits, which unblocked them inside their own handlers after the
+// first call: the S2C handler's sa_mask blocks both (34 and 35), the suspend handler's blocks 34, leaving 35 open on
+// purpose so a suspended thread can still serve an S2C call. A second S2C signal then nested on the signal stack, its
+// interrupt_enter took the outer handler's reply, and darlingserver dropped it when pushed back; the next ones nested
+// deeper, until the signal stack overflowed (SIGSEGV). (A second suspend could nest the same way.)
 #define dserver_rpc_hooks_atomic_save_t linux_sigset_t
 
 static void dserver_rpc_hooks_atomic_begin(dserver_rpc_hooks_atomic_save_t* atomic_save) {
