@@ -3,6 +3,6 @@
 
 #include <darling/emulation/conversion/process/priority.h>
 
-int sys_setpriority(int which, int who, int prio);
+long sys_setpriority(int which, int who, int prio);
 
 #endif // LINUX_SETPRIORITY_H
