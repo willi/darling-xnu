@@ -439,8 +439,9 @@ static sysctl_handler(handle_osrevision) {
 }
 
 // XNU's kern.hostid (kern_sysctl.c): a system-wide int, 0 until root sets it. libbsm's audit_set_terminal_host() reads
-// it for every audit token's terminal. Darling has nowhere system-wide to keep a new value, so setting it fails rather
-// than changing one process's copy.
+// it for every audit token's terminal. A write is EPERM, which XNU also answers to a writer that isn't root (the
+// sysctl is CTLFLAG_RW without CTLFLAG_ANYBODY); only a root writer differs. Nothing here writes it. Making it
+// writable would mean keeping the value in darlingserver, not in this process.
 static sysctl_handler(handle_hostid) {
 	int* ovalue = (int*)old;
 	if (_new && newlen > 0)
