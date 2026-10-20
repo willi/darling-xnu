@@ -686,9 +686,12 @@ fail:
 		long got;
 		while ((got = sys_read_nocancel(pipe[0], &ret, sizeof(ret))) == -EINTR)
 			;
-		// EOF is success; a negative errno is the error. One outside XNU's range is still an error, never success (that
-		// gave the caller the pid of a child that had exited): a Linux errno that reached the pipe unconverted, as
-		// XNU's if it has one, else EIO
+		// A negative errno is the error. EOF is success, and so is a read that fails or comes up short: the outcome is
+		// unknown, and taking it for an error would reap (wait for) a child that may be running; the writers write 4
+		// bytes at once to a pipe only this process reads. An error outside XNU's range is still an error, never
+		// success (that gave the caller the pid of a child that had exited): a Linux errno that reached the pipe
+		// unconverted, as XNU's if it has one, else EIO. One inside the range can't be told from XNU's: the writers
+		// (the child's fail: below the fork, mldr's spawn_pipe_fail) keep to XNU's numbers, and this doesn't excuse them.
 		if (got != sizeof(ret) || ret >= 0)
 			ret = 0;
 		else if (ret < -ELAST)
