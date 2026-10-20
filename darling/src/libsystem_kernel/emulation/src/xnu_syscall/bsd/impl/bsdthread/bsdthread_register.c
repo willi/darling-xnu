@@ -19,6 +19,11 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/qos_sched.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
 
+// bsdthread_create()'s flags (libpthread-539 kern/kern_support.c 143-149)
+#define PTHREAD_START_SETSCHED      0x02000000
+#define PTHREAD_START_QOSCLASS      0x08000000
+#define PTHREAD_START_QOSCLASS_MASK 0x00ffffff
+
 int pthread_obj_size;
 bsdthread_entry_t pthread_entry_point;
 bsdwqthread_entry_t wqueue_entry_point;
@@ -124,6 +129,13 @@ void pthread_entry_point_wrapper(void* self, int thread_port, void* funptr,
 	if (dserver_rpc_set_thread_handles(pthread_handle, dispatch_qaddr) < 0) {
 		__simple_abort();
 	}
+
+	// The new thread runs at the QoS pthread_create asked for, which XNU's bsdthread_create sets on it (libpthread-539
+	// kern/kern_support.c 403-413; default attributes ask for legacy, src/pthread.c 109 and 1547-1549). Without a
+	// QoS (PTHREAD_START_SETSCHED, a fixed priority), the process's base. Either way it doesn't keep the nice clone()
+	// copied from its creator, which XNU's threads don't inherit.
+	qos_sched_apply_self(((flags & PTHREAD_START_QOSCLASS) && !(flags & PTHREAD_START_SETSCHED))
+			? _pthread_priority_thread_qos(flags & PTHREAD_START_QOSCLASS_MASK) : THREAD_QOS_UNSPECIFIED);
 
 	// No additional function calls should occur beyond this point. Otherwise, we will risk our
 	// registers being call-clobbered. I recommend reading the following doc for more details:
