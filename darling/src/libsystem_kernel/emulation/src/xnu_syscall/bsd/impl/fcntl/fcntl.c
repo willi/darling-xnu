@@ -109,7 +109,9 @@ static long long ns_now(void)
 // F_SETLKWTIMEOUT and F_OFD_SETLKWTIMEOUT: as F_SETLKW and F_OFD_SETLKW, but failing with ETIMEDOUT once the timeout
 // (from now; none: no limit) passes, as XNU's lf_setlock(). Linux has no such wait: the lock is tried again until
 // then. Apple's SQLite waits for its locks this way.
-static long setlk_timeout(int fd, int cmd, struct bsd_flocktimeout* ft)
+static long fcntl_body(int fd, int cmd, long arg, int cp);
+
+static long setlk_timeout(int fd, int cmd, struct bsd_flocktimeout* ft, int cp)
 {
 	int ofd = cmd == XNU_F_OFD_SETLKWTIMEOUT;
 	long long end, now, delay = 1000000;
@@ -117,7 +119,7 @@ static long setlk_timeout(int fd, int cmd, struct bsd_flocktimeout* ft)
 	if (!ft)
 		return -EFAULT;
 	if (!ft->timeout.tv_sec && !ft->timeout.tv_nsec)
-		return sys_fcntl_nocancel(fd, ofd ? XNU_F_OFD_SETLKW : F_SETLKW, (long) &ft->fl);
+		return fcntl_body(fd, ofd ? XNU_F_OFD_SETLKW : F_SETLKW, (long) &ft->fl, cp);
 
 	end = ns_now() + ft->timeout.tv_sec * 1000000000LL + ft->timeout.tv_nsec;
 	for (;;)
@@ -125,6 +127,9 @@ static long setlk_timeout(int fd, int cmd, struct bsd_flocktimeout* ft)
 		long rv = sys_fcntl_nocancel(fd, ofd ? XNU_F_OFD_SETLK : F_SETLK, (long) &ft->fl);
 		if (rv != -EAGAIN && rv != -EACCES)
 			return rv;
+		// the wait's cancellation point, between the tries (bsdthread/cancelable.h)
+		if (cp && __darling_cancel_pending(__darling_cancel_flags()))
+			return -EINTR;
 		now = ns_now();
 		if (now >= end)
 			return -ETIMEDOUT;
@@ -140,10 +145,16 @@ static long setlk_timeout(int fd, int cmd, struct bsd_flocktimeout* ft)
 long sys_fcntl(int fd, int cmd, long arg)
 {
 	CANCELATION_POINT();
-	return sys_fcntl_nocancel(fd, cmd, arg);
+	return fcntl_body(fd, cmd, arg, 1);
 }
 
 long sys_fcntl_nocancel(int fd, int cmd, long arg)
+{
+	return fcntl_body(fd, cmd, arg, 0);
+}
+
+// cp: fcntl's, whose lock waits (F_SETLKW, F_OFD_SETLKW and their timeouts) a cancel interrupts
+static long fcntl_body(int fd, int cmd, long arg, int cp)
 {
 	int ret, linux_cmd = cmd_bsd_to_linux(cmd);
 	long original_arg = arg;
@@ -154,7 +165,7 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 			return 0;
 		case XNU_F_SETLKWTIMEOUT:
 		case XNU_F_OFD_SETLKWTIMEOUT:
-			return setlk_timeout(fd, cmd, (struct bsd_flocktimeout*) arg);
+			return setlk_timeout(fd, cmd, (struct bsd_flocktimeout*) arg, cp);
 		// Darling does not enforce code signatures: accept the file's signature as covering the whole file.
 		// dyld (and the iOS Simulator's dyld_sim) refuse to map an image whose signature does not reach its
 		// code signature blob, so F_ADDFILESIGS_RETURN reports the largest end offset.
@@ -222,9 +233,9 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
 	}
 
 #ifdef __NR_fcntl64
-	ret = LINUX_SYSCALL(__NR_fcntl64, fd, linux_cmd, arg);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_fcntl64, fd, linux_cmd, arg);
 #else
-	ret = LINUX_SYSCALL(__NR_fcntl, fd, linux_cmd, arg);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_fcntl, fd, linux_cmd, arg);
 #endif
 	if (ret < 0)
 	{

@@ -40,10 +40,15 @@ extern char* strcpy(char* dst, const char* src);
 long sys_openat(int fd, const char* filename, int flags, unsigned int mode)
 {
 	CANCELATION_POINT();
-	return sys_openat_nocancel(fd, filename, flags, mode);
+	return openat_body(fd, filename, flags, mode, 1);
 }
 
 long sys_openat_nocancel(int fd, const char* filename, int flags, unsigned int mode)
+{
+	return openat_body(fd, filename, flags, mode, 0);
+}
+
+long openat_body(int fd, const char* filename, int flags, unsigned int mode, int cp)
 {
 	int ret, linux_flags;
 	if (!filename)
@@ -102,12 +107,12 @@ long sys_openat_nocancel(int fd, const char* filename, int flags, unsigned int m
 	// an event-only descriptor (O_EVTONLY, for watching the object) needs no access to it: that stays O_PATH
 	if ((flags & BSD_O_SYMLINK) && !(flags & XNU_O_EVTONLY))
 	{
-		ret = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, linux_flags & ~LINUX_O_PATH, mode);
+		ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_openat, vc.dfd, vc.path, linux_flags & ~LINUX_O_PATH, mode);
 		if (ret != -LINUX_ELOOP)
 			return ret < 0 ? errno_linux_to_bsd(ret) : ret;
 	}
 
-	ret = LINUX_SYSCALL(__NR_openat, vc.dfd, vc.path, linux_flags, mode);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_openat, vc.dfd, vc.path, linux_flags, mode);
 	if (ret < 0)
 		ret = errno_linux_to_bsd(ret);
 
