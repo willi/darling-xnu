@@ -95,10 +95,9 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 		return fd;
 
 	ret = sys_read_nocancel(fd, shebang, sizeof(shebang));
+	close_internal(fd);
 	if (ret < 0)
 		return ret;
-
-	close_internal(fd);
 
 	bool is_script = false;
 	bool is_macho = false;
