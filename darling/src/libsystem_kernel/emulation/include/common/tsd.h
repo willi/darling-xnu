@@ -10,6 +10,8 @@
 #define __PTK_DARLING_WORKLOOP            __PTK_DARLING_KEY3
 // the thread's cancellation flags, XNU's uthread ones (bsdthread/cancelable.h)
 #define __PTK_DARLING_CANCEL              __PTK_DARLING_KEY4
+// the id of the work interval the thread is in, 0 for none (misc/work_interval_ctl.c)
+#define __PTK_DARLING_WORK_INTERVAL       __PTK_DARLING_KEY5
 // the nice the thread's QoS was last applied as, plus 21 (bsdthread/qos_sched.c)
 #define __PTK_DARLING_QOS_NICE            __PTK_DARLING_KEY6
 // other __PTK_DARLING_KEYs are currently unused

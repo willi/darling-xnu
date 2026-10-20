@@ -443,10 +443,10 @@ static sysctl_handler(handle_osrevision) {
 // than changing one process's copy.
 static sysctl_handler(handle_hostid) {
 	int* ovalue = (int*)old;
-	if (!oldlen)
-		return -EINVAL;
 	if (_new && newlen > 0)
 		return -EPERM;
+	if (!oldlen)
+		return -EINVAL;
 	if (ovalue && *oldlen >= sizeof(int))
 		*ovalue = 0;
 	*oldlen = sizeof(int);
