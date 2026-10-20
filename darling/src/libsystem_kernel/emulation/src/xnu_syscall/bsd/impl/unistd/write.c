@@ -42,7 +42,7 @@ static long write_body(int fd, const void* mem, int len, int cp)
 	if (NOSIGPIPE_ACTIVE()) {
 		struct iovec iov = { (void*) mem, len };
 		long sent;
-		if (socket_nosigpipe_write(fd, &iov, 1, &sent))
+		if (socket_nosigpipe_write(fd, &iov, 1, cp, &sent))
 			return sent < 0 ? socket_send_failed(fd, sent, 0, 0) : sent;
 	}
 

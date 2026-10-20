@@ -32,7 +32,7 @@ static long writev_body(int fd, struct iovec* iovp, unsigned int len, int cp)
 	// a socket with SO_NOSIGPIPE (nosigpipe.h); an iovec count writev() refuses is left to it
 	if (NOSIGPIPE_ACTIVE() && len <= 1024 /* UIO_MAXIOV */) {
 		long sent;
-		if (socket_nosigpipe_write(fd, iovp, len, &sent))
+		if (socket_nosigpipe_write(fd, iovp, len, cp, &sent))
 			return sent < 0 ? socket_send_failed(fd, sent, 0, 0) : sent;
 	}
 

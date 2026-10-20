@@ -28,9 +28,10 @@ long socket_nosigpipe_set(int fd, int on);
 long socket_nosigpipe_get(int fd, int* on);
 
 // write/writev on fd: if fd is a socket with SO_NOSIGPIPE, sends iov through sendmsg with MSG_NOSIGNAL, stores the
-// result (bytes, or a negative BSD errno) in *result and returns 1. Returns 0 for other descriptors.
+// result (bytes, or a negative BSD errno) in *result and returns 1. Returns 0 for other descriptors. With cp, the
+// sendmsg is a cancellation point's blocking call (bsdthread/cancelable.h), as write's and writev's own are.
 struct iovec;
-int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, long* result);
+int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, int cp, long* result);
 
 // A send on fd returned ret (bytes, or a negative BSD errno) after the socket error paths (sostate.h). If it's EPIPE
 // and neither the send (msg_nosignal: BSD MSG_NOSIGNAL) nor the socket asked for none, raises SIGPIPE,
