@@ -4,6 +4,7 @@
 #include <mach-o/loader.h>
 #include <sys/codesign.h>
 #include <sys/errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 #include <strings.h>
