@@ -76,26 +76,37 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		unsigned long pth_regdata_len, unsigned long long dpq_offset)
 {
 	// The registration data is read and written by the size the caller passed, and its version must be that
-	// size, as XNU's bsdthread_register does (libpthread-539 kern/kern_support.c 557-570 and 626-663).
+	// size, as XNU's bsdthread_register does (libpthread-539 kern/kern_support.c 557-570 and 626-663): a zeroed
+	// copy, kept only once it's valid, so a rejected registration leaves the previous one in place.
+	struct _pthread_registration_data data = {0};
 	size_t regdata_size = 0;
 	if (pth_regdata != NULL) {
 		if (pth_regdata_len < sizeof(pth_regdata->version))
 			return -EINVAL;
-		regdata_size = pth_regdata_len < sizeof(g_pth_regdata) ? pth_regdata_len : sizeof(g_pth_regdata);
-		memcpy(&g_pth_regdata, pth_regdata, regdata_size);
-		if (g_pth_regdata.version != pth_regdata_len)
+		regdata_size = pth_regdata_len < sizeof(data) ? pth_regdata_len : sizeof(data);
+		// not memcpy: the SDK's fortified macro makes a variable-length one __memcpy_chk, which dyld's static
+		// link of this file doesn't have
+		__builtin_memcpy(&data, pth_regdata, regdata_size);
+		if (data.version != pth_regdata_len)
 			return -EINVAL;
 	} else {
-		g_pth_regdata.dispatch_queue_offset = dpq_offset;
+		data.dispatch_queue_offset = dpq_offset;
 	}
+	g_pth_regdata = data;
 
 	pthread_obj_size = pthsize;
 	pthread_entry_point = (bsdthread_entry_t) thread_start;
 	wqueue_entry_point = (bsdwqthread_entry_t) wqthread;
 
-	// The main thread's QoS goes back to libpthread, which keeps it for qos_class_main(). Darling keeps no
-	// per-thread QoS policy, so this is what XNU answers for a thread without one: legacy. With 0 here,
-	// qos_class_main() was QOS_CLASS_UNSPECIFIED in every process (BoardServices' BSServiceQuality traps on it).
+	// The main thread's QoS goes back to libpthread, which keeps it for qos_class_main() and the main thread's QoS
+	// TSD slot. XNU answers the QoS exec gave the main thread (task_compute_main_thread_qos, from the spawn's process
+	// type: user-interactive for an app, legacy for a daemon, background for a background daemon, lowered by a spawn
+	// QoS clamp), or legacy, which it imposes, when there is none. Darling carries neither the process type nor the
+	// clamp across a spawn, so every process gets legacy: XNU's answer for a daemon or a plain binary, one tier low
+	// for an app. Before this, the 0 here made qos_class_main() QOS_CLASS_UNSPECIFIED in every process.
+	// XNU also writes back version, stack_addr_hint and mutex_default_policy. libpthread doesn't read version back,
+	// and 0 is the default for the other two (libpthread keeps its own stack hint; the default mutex policy is 0
+	// unless a boot-arg sets it), so leaving them is XNU's answer too.
 	if (regdata_size >= offsetof(struct _pthread_registration_data, main_qos) + sizeof(pth_regdata->main_qos))
 		pth_regdata->main_qos = _pthread_priority_make_from_thread_qos(THREAD_QOS_LEGACY, 0, 0);
 
