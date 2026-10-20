@@ -27,10 +27,6 @@
 #ifndef CSMAGIC_EMBEDDED_DER_ENTITLEMENTS
 #define CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172
 #endif
-// sys/proc_info.h has it only for PRIVATE
-#ifndef PIF_COMPARE_IDVERSION
-#define PIF_COMPARE_IDVERSION 0x01
-#endif
 
 // Finds the blob in the given slot of an executable's embedded code signature: its offset in the file and its length,
 // or a length of 0 when the executable has no such blob. A blob without the given magic is an error. Returns a negative
