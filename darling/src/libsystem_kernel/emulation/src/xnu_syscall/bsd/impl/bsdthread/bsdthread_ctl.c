@@ -1,3 +1,6 @@
+// THREAD_QOS_* and pthread_priority_t's encoding are PRIVATE in mach/thread_policy.h and pthread/priority_private.h
+#define PRIVATE 1
+#define __PTHREAD_EXPOSE_INTERNALS__ 1
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/bsdthread_ctl.h>
 
 #include <sys/errno.h>
@@ -5,7 +8,6 @@
 #include <mach/mach_host.h>
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
-#define __PTHREAD_EXPOSE_INTERNALS__ 1
 #include <pthread/priority_private.h>
 
 // bsd/pthread/bsdthread_private.h

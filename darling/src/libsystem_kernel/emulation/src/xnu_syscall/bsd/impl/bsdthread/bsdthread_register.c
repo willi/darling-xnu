@@ -1,10 +1,12 @@
+// THREAD_QOS_* and pthread_priority_t's encoding are PRIVATE in mach/thread_policy.h and pthread/priority_private.h
+#define PRIVATE 1
+#define __PTHREAD_EXPOSE_INTERNALS__ 1
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.h>
 
 #include <sys/errno.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <pthread/tsd_private.h>
-#define __PTHREAD_EXPOSE_INTERNALS__ 1
 #include <pthread/priority_private.h>
 
 #include <darling/emulation/common/base.h>
@@ -39,8 +41,6 @@ struct _pthread_registration_data {
 } __attribute__ ((packed));
 
 static struct _pthread_registration_data g_pth_regdata;
-
-extern void* memcpy(void* dst, const void* src, size_t n);
 
 // What bsdthread_register() tells libpthread (and through it, libdispatch) the kernel supports. The syscalls
 // behind every bit are always there, as a kernel's would be; the mask only decides which code paths the process's
