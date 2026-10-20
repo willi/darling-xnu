@@ -222,6 +222,8 @@ static int spawn_action_target_fd(const struct xnu__psfa_action* act)
 	}
 }
 
+// Every error here, `ret` included, is a negative XNU errno, as the sys_* calls return; the Linux calls' are converted
+// where they're made (B61). The forked child sends its error to the parent through the pipe as one.
 long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_desc* desc,
 		char** argvp, char** envp)
 {
@@ -268,7 +270,10 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
 
 	ret = LINUX_SYSCALL(__NR_pipe2, pipe, LINUX_O_CLOEXEC);
 	if (ret < 0)
+	{
+		ret = errno_linux_to_bsd(ret);
 		goto out;
+	}
 
 	// mldr gets the write end: keep it above stdin, stdout and stderr, so nothing it prints lands in the pipe
 	if (pipe[1] < 3)
@@ -467,7 +472,7 @@ no_fork:
 				close_internal(dir);
 
 				if (len < 0) {
-					ret = len;
+					ret = errno_linux_to_bsd(len);
 					goto fail;
 				}
 			}
@@ -636,7 +641,7 @@ fail:
 			spawn_close_fileports(fileport_fds, nfileports);
 			if (nports > 0)
 				spawn_restore_special_ports(ports, nports);
-			ret = errno_linux_to_bsd(ret);
+			// XNU's already: converting it again turned ELOOP (62) into ETIME, ENAMETOOLONG (63) into ENOSR
 			return ret;
 		}
 		else
@@ -681,9 +686,20 @@ fail:
 		long got;
 		while ((got = sys_read_nocancel(pipe[0], &ret, sizeof(ret))) == -EINTR)
 			;
-		// only a negative errno is an error; EOF is success
-		if (got != sizeof(ret) || ret >= 0 || ret < -ELAST)
+		// A negative errno is the error. EOF is success, and so is a read that fails or comes up short: the outcome is
+		// unknown, and taking it for an error would reap (wait for) a child that may be running; the writers write 4
+		// bytes at once to a pipe only this process reads. An error outside XNU's range is still an error, never
+		// success (that gave the caller the pid of a child that had exited): a Linux errno that reached the pipe
+		// unconverted, as XNU's if it has one, else EIO. One inside the range can't be told from XNU's: the writers
+		// (the child's fail: below the fork, mldr's spawn_pipe_fail) keep to XNU's numbers, and this doesn't excuse them.
+		if (got != sizeof(ret) || ret >= 0)
 			ret = 0;
+		else if (ret < -ELAST)
+		{
+			ret = errno_linux_to_bsd(ret);
+			if (ret < -ELAST)
+				ret = -EIO;
+		}
 		close_internal(pipe[0]);
 
 		// a failed spawn leaves no process on XNU, and gives no pid: reap the child that reported it
