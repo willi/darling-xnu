@@ -13,6 +13,9 @@
 // darlingserver's pthread_markcancel (bsdthread/cancelable.h, sigexc.c); darlingserver's call.cpp sends the same
 #define SIGNAL_PTHREAD_CANCEL (LINUX_SIGRTMIN + 2)
 _Static_assert(SIGNAL_PTHREAD_CANCEL <= LINUX_SIGRTMAX, "a real-time signal of its own");
+// all three: unblocked once the handlers are in (sigexc_setup), blocked across an exec (execve.c)
+#define DARLING_PRIVATE_SIGSET \
+	((1ull << (SIGNAL_SIGEXC_SUSPEND-1)) | (1ull << (SIGNAL_S2C-1)) | (1ull << (SIGNAL_PTHREAD_CANCEL-1)))
 
 void sigexc_setup(void);
 

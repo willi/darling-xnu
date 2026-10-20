@@ -91,10 +91,7 @@ void sigexc_setup1(void)
 
 void sigexc_setup2(void)
 {
-	linux_sigset_t set;
-	set = (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
-	set |= (1ull << (SIGNAL_S2C-1));
-	set |= (1ull << (SIGNAL_PTHREAD_CANCEL-1));
+	linux_sigset_t set = DARLING_PRIVATE_SIGSET;
 
 	LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
 		&set, NULL, sizeof(linux_sigset_t));
