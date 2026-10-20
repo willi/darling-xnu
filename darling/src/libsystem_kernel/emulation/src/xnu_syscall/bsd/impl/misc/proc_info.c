@@ -132,6 +132,7 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, bool find_zombie, void* buff
 static long fill_shortbsdinfo(int32_t pid, bool find_zombie, struct proc_bsdshortinfo* info, struct proc_names* names);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_tbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_bsdinfowithuniqid(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
@@ -167,6 +168,10 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		case PROC_PIDTBSDINFO:
 		{
 			return _proc_pidinfo_tbsdinfo(pid, find_zombie, buffer, bufsize);
+		}
+		case PROC_PIDT_BSDINFOWITHUNIQID:
+		{
+			return _proc_pidinfo_bsdinfowithuniqid(pid, find_zombie, buffer, bufsize);
 		}
 		case PROC_PIDTHREADINFO:
 		{
@@ -231,6 +236,26 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 	info->p_idversion = pidversion;
 #endif
 	return sizeof(struct proc_uniqidentifierinfo);
+}
+
+// launchd_sim asks for this at every spawn, for the job's unique id and pid version
+static long _proc_pidinfo_bsdinfowithuniqid(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize)
+{
+	struct proc_bsdinfowithuniqid* info = (struct proc_bsdinfowithuniqid*) buffer;
+
+	if (bufsize < sizeof(*info))
+		return -ENOSPC;
+
+	long err = _proc_pidinfo_tbsdinfo(pid, find_zombie, &info->pbsd, sizeof(info->pbsd));
+	if (err < 0)
+		return err;
+
+	// proc_pidinfo() ignores proc_piduniqidentifierinfo()'s result, which can't fail there: the ids stay zero if
+	// darlingserver doesn't know the process
+	if (_proc_pidonfo_uniqinfo(pid, &info->p_uniqidentifier, sizeof(info->p_uniqidentifier)) < 0)
+		memset(&info->p_uniqidentifier, 0, sizeof(info->p_uniqidentifier));
+
+	return sizeof(struct proc_bsdinfowithuniqid);
 }
 
 // glibc bits/confname.h
