@@ -1,8 +1,7 @@
 #ifndef _BSDTHREAD_CANCELLABLE_H
 #define _BSDTHREAD_CANCELLABLE_H
 
-#include <sys/errno.h>
-
+// The parts above __ASSEMBLER__ are for linux-syscall.S and sig_restorer.S too, so each constant has one copy.
 
 // A thread's cancellation state: XNU's uthread flags (bsd/sys/user.h 347-349), in the thread's own TSD slot
 // (__PTK_DARLING_CANCEL) instead of the kernel, so that a cancellation point reads them without asking darlingserver.
@@ -15,6 +14,16 @@
 // __PTK_DARLING_CANCEL (common/tsd.h; pthread_canceled.c checks it), not included here: libpthread's tsd_private.h
 // brings string.h's fortified macros into every file that has a cancellation point
 #define __DARLING_CANCEL_KEY 204
+// the slot's offset from %gs, which the assembly reads: __DARLING_CANCEL_KEY * sizeof(void*) (pthread_canceled.c)
+#define __DARLING_CANCEL_GS_OFFSET 1632
+// the bits XNU's test for a cancellation to act on looks at, and their value when it acts (__darling_cancel_pending)
+#define __DARLING_CANCEL_TEST (DARLING_UT_CANCELDISABLE | DARLING_UT_CANCEL | DARLING_UT_CANCELED)
+#define __DARLING_CANCEL_ACT DARLING_UT_CANCEL
+
+#ifndef __ASSEMBLER__
+
+#include <sys/errno.h>
+
 #define __darling_cancel_slot (*(unsigned long*)(__DARLING_CANCEL_KEY * sizeof(void*)))
 
 static inline unsigned long __darling_cancel_flags(void)
@@ -48,7 +57,7 @@ static inline int __darling_cancel_flags_swap(unsigned long old_flags, unsigned 
 // XNU's test for a cancellation to act on (bsd/kern/kern_sig.c 977 and 1046): marked, not yet acted on, not disabled
 static inline int __darling_cancel_pending(unsigned long flags)
 {
-	return (flags & (DARLING_UT_CANCELDISABLE | DARLING_UT_CANCEL | DARLING_UT_CANCELED)) == DARLING_UT_CANCEL;
+	return (flags & __DARLING_CANCEL_TEST) == __DARLING_CANCEL_ACT;
 }
 
 // XNU's __pthread_testcancel(1) before a cancelable syscall (kern_sig.c 969-987): EINTR, leaving the cancellation for
@@ -56,5 +65,7 @@ static inline int __darling_cancel_pending(unsigned long flags)
 #define CANCELATION_POINT() \
 	if (__darling_cancel_pending(__darling_cancel_flags())) \
 		return -EINTR;
+
+#endif // __ASSEMBLER__
 
 #endif // _BSDTHREAD_CANCELLABLE_H
