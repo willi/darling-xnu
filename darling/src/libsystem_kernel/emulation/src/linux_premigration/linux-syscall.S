@@ -76,14 +76,13 @@ _linux_syscall:
 #endif
 
 // linux_syscall for a cancelable syscall's blocking call (bsdthread/cancelable.h): the same, with XNU's test for a
-// cancellation to act on (bsd/kern/kern_sig.c 977) in the range [___darling_cp_begin, ___darling_cp_end), which ends
-// right after the syscall instruction. The cancel signal's handler (sigexc.c) moves a thread it finds in that range to
-// ___darling_cp_cancel, which returns -EINTR: whether the thread is before the syscall or blocked in it (the kernel
-// rewinds an interrupted syscall to its instruction, to restart it: the handler is SA_RESTART). A finished syscall is
-// past the range, and its result stands. CANCEL_FLAGS and CANCEL_TEST are pthread_canceled.c's static asserts.
-#define CANCEL_FLAGS	1632	// __PTK_DARLING_CANCEL's TSD slot, from %gs
-#define CANCEL_TEST	0x38	// DARLING_UT_CANCELDISABLE | DARLING_UT_CANCEL | DARLING_UT_CANCELED
-#define CANCEL_ACT	0x8	// DARLING_UT_CANCEL alone
+// cancellation to act on (xnu-7195.141.2 bsd/kern/kern_sig.c 977) in the range [___darling_cp_begin,
+// ___darling_cp_end), which ends right after the syscall instruction. A signal handler's return (sig_restorer.S) moves
+// a thread with a cancellation to act on that it finds in that range to ___darling_cp_cancel, which returns -EINTR:
+// whether the thread is before the syscall or blocked in it (the kernel rewinds an interrupted syscall to its
+// instruction, to restart it: the handlers are SA_RESTART). A finished syscall is past the range, and its result
+// stands.
+#include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #define LINUX_EINTR	4
 
 #if defined(__x86_64__)
@@ -101,9 +100,9 @@ _linux_syscall_cp:
 	movl	8(%rsp), %eax
 	movq	%rcx, %r10
 ___darling_cp_begin:
-	movq	%gs:CANCEL_FLAGS, %r11
-	andq	$CANCEL_TEST, %r11
-	cmpq	$CANCEL_ACT, %r11
+	movq	%gs:__DARLING_CANCEL_GS_OFFSET, %r11
+	andq	$__DARLING_CANCEL_TEST, %r11
+	cmpq	$__DARLING_CANCEL_ACT, %r11
 	je	___darling_cp_cancel
 	syscall
 ___darling_cp_end:
@@ -119,5 +118,8 @@ ___darling_cp_cancel:
 .private_extern _linux_syscall_cp
 _linux_syscall_cp:
 	jmp	_linux_syscall
+
+#else
+#	error Missing assembly!
 
 #endif

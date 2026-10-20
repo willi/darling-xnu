@@ -156,7 +156,7 @@ static void forget(int fd, unsigned long long cookie)
 	sigsafe_unlock(&nosigpipe_lock, mask);
 }
 
-int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, long* result)
+int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, int cp, long* result)
 {
 	cookie_slot* s = slot(fd);
 	unsigned long long cookie = s != NULL ? __atomic_load_n(s, __ATOMIC_ACQUIRE) : 0;
@@ -167,9 +167,9 @@ int socket_nosigpipe_write(int fd, const struct iovec* iov, int iovcnt, long* re
 		return 0;
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDMSG, ((long[6]) { fd, &msg, LINUX_MSG_NOSIGNAL }));
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_SENDMSG, ((long[6]) { fd, &msg, LINUX_MSG_NOSIGNAL }));
 #else
-	ret = LINUX_SYSCALL(__NR_sendmsg, fd, &msg, LINUX_MSG_NOSIGNAL);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_sendmsg, fd, &msg, LINUX_MSG_NOSIGNAL);
 #endif
 
 	// the number was closed some way that didn't forget it, and reused for something else: write() it as before

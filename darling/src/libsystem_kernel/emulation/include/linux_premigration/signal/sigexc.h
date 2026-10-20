@@ -6,13 +6,12 @@
 #include "rtsig.h"
 #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaction.h>
 
-// NOTE: Keep these definitions up to date with lkm/darling/binfmt.c!
-// Uses one of the below magic values to toggle the debugging state
-#define SIGNAL_SIGEXC_SUSPEND	LINUX_SIGRTMIN
-#define SIGNAL_S2C (LINUX_SIGRTMIN + 1)
-// darlingserver's pthread_markcancel (bsdthread/cancelable.h, sigexc.c); darlingserver's call.cpp sends the same
-#define SIGNAL_PTHREAD_CANCEL (LINUX_SIGRTMIN + 2)
-_Static_assert(SIGNAL_PTHREAD_CANCEL <= LINUX_SIGRTMAX, "a real-time signal of its own");
+// SIGNAL_SIGEXC_SUSPEND, SIGNAL_S2C and SIGNAL_PTHREAD_CANCEL, Darling's own real-time signals, are rtsig.h's
+// (Darling's src/startup/rtsig.c), which darlingserver, the one that sends them, includes too.
+
+// the three: unblocked once the handlers are in (sigexc_setup), blocked across an exec (execve.c)
+#define DARLING_PRIVATE_SIGSET \
+	((1ull << (SIGNAL_SIGEXC_SUSPEND-1)) | (1ull << (SIGNAL_S2C-1)) | (1ull << (SIGNAL_PTHREAD_CANCEL-1)))
 
 void sigexc_setup(void);
 
