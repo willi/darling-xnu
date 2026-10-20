@@ -160,6 +160,15 @@ static void handle_cancel_signal(void)
 {
 	struct linux_sigaction sa;
 
+	// First discard one left pending by the exec that started this image (execve.c blocks it across the exec): XNU
+	// drops a cancellation across an exec. Setting SIG_IGN discards a pending signal (POSIX), and the image has no
+	// other thread yet that one could be meant for.
+	sa.sa_sigaction = (linux_sig_handler*) 1; // SIG_IGN
+	sa.sa_mask = 0;
+	sa.sa_flags = LINUX_SA_RESTORER;
+	sa.sa_restorer = sig_restorer;
+	LINUX_SYSCALL(__NR_rt_sigaction, SIGNAL_PTHREAD_CANCEL, &sa, NULL, sizeof(sa.sa_mask));
+
 	sa.sa_sigaction = (linux_sig_handler*) cancel_handler;
 	sa.sa_mask = (1ull << (SIGNAL_SIGEXC_SUSPEND-1)) | (1ull << (SIGNAL_PTHREAD_CANCEL-1));
 	sa.sa_flags = LINUX_SA_RESTORER | LINUX_SA_SIGINFO | LINUX_SA_RESTART | LINUX_SA_ONSTACK;

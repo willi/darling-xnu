@@ -252,9 +252,11 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 	linux_sigset_t set;
 	set = (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
 	set |= (1ull << (SIGNAL_S2C-1));
-	// pthread_markcancel's: the new image gets it with its default action (exit) until its sigexc_setup installs the
-	// handler; blocked, it stays pending across the exec, and marks the thread there: XNU leaves UT_CANCEL set across
-	// an exec (bsd/kern/kern_exec.c never clears it)
+	// pthread_markcancel's, which would end the new image (its default action) before its sigexc_setup installs the
+	// handler. Blocked, it stays pending across the exec, and that sigexc_setup discards it (handle_cancel_signal):
+	// XNU drops a thread's cancellation across an exec, which runs the new image on a new, zeroed uthread and copies
+	// only its signal state (xnu-12377.1.9 bsd/kern/kern_exec.c 5177-5182). A failed exec unblocks it here, and the
+	// thread, which XNU keeps, is marked.
 	set |= (1ull << (SIGNAL_PTHREAD_CANCEL-1));
 
 	// darlingserver needs to know whether the execve completes successfully or not.
