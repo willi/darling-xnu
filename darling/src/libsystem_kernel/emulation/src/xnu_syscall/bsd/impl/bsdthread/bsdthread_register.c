@@ -2,7 +2,10 @@
 
 #include <sys/errno.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <pthread/tsd_private.h>
+#define __PTHREAD_EXPOSE_INTERNALS__ 1
+#include <pthread/priority_private.h>
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
@@ -37,6 +40,8 @@ struct _pthread_registration_data {
 
 static struct _pthread_registration_data g_pth_regdata;
 
+extern void* memcpy(void* dst, const void* src, size_t n);
+
 // What bsdthread_register() tells libpthread (and through it, libdispatch) the kernel supports. The syscalls
 // behind every bit are always there, as a kernel's would be; the mask only decides which code paths the process's
 // own libraries take, so it depends on which libraries those are.
@@ -67,13 +72,32 @@ static int workq_supported_features(void)
 }
 
 long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
-		const struct _pthread_registration_data* pth_regdata,
+		struct _pthread_registration_data* pth_regdata,
 		unsigned long pth_regdata_len, unsigned long long dpq_offset)
 {
+	// The registration data is read and written by the size the caller passed, and its version must be that
+	// size, as XNU's bsdthread_register does (libpthread-539 kern/kern_support.c 557-570 and 626-663).
+	size_t regdata_size = 0;
+	if (pth_regdata != NULL) {
+		if (pth_regdata_len < sizeof(pth_regdata->version))
+			return -EINVAL;
+		regdata_size = pth_regdata_len < sizeof(g_pth_regdata) ? pth_regdata_len : sizeof(g_pth_regdata);
+		memcpy(&g_pth_regdata, pth_regdata, regdata_size);
+		if (g_pth_regdata.version != pth_regdata_len)
+			return -EINVAL;
+	} else {
+		g_pth_regdata.dispatch_queue_offset = dpq_offset;
+	}
+
 	pthread_obj_size = pthsize;
 	pthread_entry_point = (bsdthread_entry_t) thread_start;
 	wqueue_entry_point = (bsdwqthread_entry_t) wqthread;
-	g_pth_regdata = *pth_regdata;
+
+	// The main thread's QoS goes back to libpthread, which keeps it for qos_class_main(). Darling keeps no
+	// per-thread QoS policy, so this is what XNU answers for a thread without one: legacy. With 0 here,
+	// qos_class_main() was QOS_CLASS_UNSPECIFIED in every process (BoardServices' BSServiceQuality traps on it).
+	if (regdata_size >= offsetof(struct _pthread_registration_data, main_qos) + sizeof(pth_regdata->main_qos))
+		pth_regdata->main_qos = _pthread_priority_make_from_thread_qos(THREAD_QOS_LEGACY, 0, 0);
 
 	uintptr_t pthread_handle = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
 	uintptr_t dispatch_qaddr = pthread_handle + g_pth_regdata.tsd_offset + g_pth_regdata.dispatch_queue_offset;
