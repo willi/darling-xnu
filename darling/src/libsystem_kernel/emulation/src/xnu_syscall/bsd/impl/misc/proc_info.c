@@ -170,6 +170,7 @@ static long fill_shortbsdinfo(int32_t pid, bool find_zombie, struct proc_bsdshor
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_tbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_bsdinfowithuniqid(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_exitreason(int32_t pid, int32_t bufsize, int32_t size);
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
@@ -209,6 +210,14 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		case PROC_PIDT_BSDINFOWITHUNIQID:
 		{
 			return _proc_pidinfo_bsdinfowithuniqid(pid, find_zombie, buffer, bufsize);
+		}
+		case PROC_PIDEXITREASONINFO:
+		{
+			return _proc_pidinfo_exitreason(pid, bufsize, sizeof(struct proc_exitreasoninfo));
+		}
+		case PROC_PIDEXITREASONBASICINFO:
+		{
+			return _proc_pidinfo_exitreason(pid, bufsize, sizeof(struct proc_exitreasonbasicinfo));
 		}
 		case PROC_PIDTHREADINFO:
 		{
@@ -293,6 +302,32 @@ static long _proc_pidinfo_bsdinfowithuniqid(int32_t pid, bool find_zombie, void*
 		memset(&info->p_uniqidentifier, 0, sizeof(info->p_uniqidentifier));
 
 	return sizeof(struct proc_bsdinfowithuniqid);
+}
+
+// XNU's proc_pidexitreasoninfo() (bsd/kern/proc_info.c), which launchd_sim asks at every job's exit: the process, a
+// zombie too, may be asked about only by its parent (else EACCES), and one without an exit reason is ENOENT. Darling
+// records no exit reasons, so the parent always gets ENOENT. XNU also lets a tracing parent-in-waiting ask; Darling
+// doesn't keep the original parent, so that one gets EACCES.
+static long _proc_pidinfo_exitreason(int32_t pid, int32_t bufsize, int32_t size)
+{
+	char path[64], stat[1024];
+	char *statptr;
+	const char* elem;
+
+	if (bufsize < size)
+		return -ENOSPC;
+
+	__simple_sprintf(path, "/proc/%d/stat", pid);
+	if (!read_string(path, stat, sizeof(stat)))
+		return -ESRCH;
+	statptr = stat;
+	skip_stat_elems(&statptr, 3); // pid, comm, state
+	elem = next_stat_elem(&statptr);
+	if (!elem)
+		return -ESRCH;
+	if (__simple_atoi(elem, NULL) != sys_getpid())
+		return -EACCES;
+	return -ENOENT;
 }
 
 // glibc bits/confname.h
