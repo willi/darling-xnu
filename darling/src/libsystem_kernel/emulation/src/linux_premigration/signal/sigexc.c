@@ -129,11 +129,12 @@ static void handle_rt_signal(int signum)
 _Static_assert(__builtin_offsetof(struct linux_ucontext, uc_mcontext.gregs.rip) == 168, "sig_restorer.S's UC_RIP");
 #endif
 
-// darlingserver's pthread_markcancel, on the thread it marks: XNU's __pthread_markcancel (bsd/kern/kern_sig.c
-// 1009-1015) for that thread. The mark is set unless the thread was marked already or has acted on one. Then, unless
-// cancellation is disabled, thread_abort_safely's part, which is the handler's return through sig_restorer.S: a thread
-// in a cancelable syscall's blocking call (linux_syscall_cp) leaves it with EINTR, which its cerror acts on. Elsewhere
-// the thread is not in a cancellation point (XNU's UT_NOTCANCELPT), and the next one acts on the mark.
+// darlingserver's pthread_markcancel, on the thread it marks: XNU's __pthread_markcancel (xnu-7195.141.2
+// bsd/kern/kern_sig.c 1009-1015; xnu-12377.1.9 936) for that thread. The mark is set unless the thread was marked
+// already or has acted on one. Then, unless cancellation is disabled, thread_abort_safely's part, which is the
+// handler's return through sig_restorer.S: a thread in a cancelable syscall's blocking call (linux_syscall_cp) leaves
+// it with EINTR, which its cerror acts on. Elsewhere the thread is not in a cancellation point (XNU's UT_NOTCANCELPT),
+// and the next one acts on the mark.
 static void cancel_handler(int signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
 	unsigned long flags = __darling_cancel_flags();
@@ -148,7 +149,7 @@ static void cancel_handler(int signum, struct linux_siginfo* info, struct linux_
 // epoll_wait and so kevent, nanosleep, a timed futex and so a timed __ulock_wait, rt_sigtimedwait, and recv or send
 // with SO_RCVTIMEO or SO_SNDTIMEO). Such a wait returns EINTR once, also in a cancellation point while cancellation is
 // disabled. That is a divergence: XNU's __pthread_markcancel never aborts a thread in a BSD syscall that isn't a
-// cancellation point (unix_syscall sets UT_NOTCANCELPT, this tree's xnu-7195.141.2 bsd/dev/i386/systemcalls.c 186), nor
+// cancellation point (unix_syscall sets UT_NOTCANCELPT, xnu-7195.141.2 bsd/dev/i386/systemcalls.c 186), nor
 // one whose cancellation is disabled. Their callers (libdispatch, os_unfair_lock) retry on EINTR.
 static void handle_cancel_signal(void)
 {
@@ -268,11 +269,11 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
 
 	int status = dserver_rpc_interrupt_enter();
 
-	// darlingserver saw this thread die (its checkout) with this interrupt_enter queued behind the checkout, and answered
-	// it first: there's nothing to suspend or run, and the checkout takes its own reply, which comes next. Only that
-	// queued case is covered here. An interrupt_enter that reaches darlingserver after the checkout's reply has gone out
-	// gets that reply, which then goes back to a dead thread, and the checkout waits for ever: mldr blocking
-	// darlingserver's signals before the checkout is the fix, and this is a defence behind it.
+	// darlingserver saw this thread die (its checkout) with this interrupt_enter queued behind the checkout, and
+	// answered it first: there's nothing to suspend or run, and the checkout takes its own reply, which comes next.
+	// Only that queued case is covered here. An interrupt_enter that reaches darlingserver after the checkout's reply
+	// has gone out gets that reply, which then goes back to a dead thread, and the checkout waits for ever: mldr
+	// blocking darlingserver's signals before the checkout is the fix, and this is a defence behind it.
 	if (status == -LINUX_ESRCH)
 		return;
 

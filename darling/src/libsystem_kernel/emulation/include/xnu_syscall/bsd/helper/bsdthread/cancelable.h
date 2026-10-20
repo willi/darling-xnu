@@ -3,10 +3,11 @@
 
 // The parts above __ASSEMBLER__ are for linux-syscall.S and sig_restorer.S too, so each constant has one copy.
 
-// A thread's cancellation state: XNU's uthread flags (bsd/sys/user.h 347-349), in the thread's own TSD slot
-// (__PTK_DARLING_CANCEL) instead of the kernel, so that a cancellation point reads them without asking darlingserver.
-// The thread and its cancel signal's handler (sigexc.c) are their only writers, and each write is one instruction, so
-// a handler that lands in the middle of the thread's own update loses nothing. A new thread's TSD is zero.
+// A thread's cancellation state: XNU's uthread flags (xnu-7195.141.2 bsd/sys/user.h 347-349), in the thread's own TSD
+// slot (__PTK_DARLING_CANCEL) instead of the kernel, so that a cancellation point reads them without asking
+// darlingserver. The thread and its cancel signal's handler (sigexc.c) are their only writers, and each write is one
+// instruction, so a handler that lands in the middle of the thread's own update loses nothing. A new thread's TSD is
+// zero.
 #define DARLING_UT_CANCEL        0x8  // marked: pthread_markcancel, not yet acted on
 #define DARLING_UT_CANCELED      0x10 // acted on: the thread is exiting
 #define DARLING_UT_CANCELDISABLE 0x20
@@ -54,7 +55,8 @@ static inline int __darling_cancel_flags_swap(unsigned long old_flags, unsigned 
 	return swapped;
 }
 
-// XNU's test for a cancellation to act on (bsd/kern/kern_sig.c 977 and 1046): marked, not yet acted on, not disabled
+// XNU's test for a cancellation to act on (xnu-7195.141.2 bsd/kern/kern_sig.c 977 and 1046): marked, not yet acted on,
+// not disabled
 static inline int __darling_cancel_pending(unsigned long flags)
 {
 	return (flags & __DARLING_CANCEL_TEST) == __DARLING_CANCEL_ACT;
@@ -74,8 +76,9 @@ static inline int __darling_cancel_pending(unsigned long flags)
 // - Not tested: fsync, fdatasync and waitid, which are cancellation points in XNU (vfs_syscalls.c fsync and
 //   fdatasync, kern_exit.c waitid); a cancel sent while they block is acted on at the next cancellation point.
 
-// XNU's __pthread_testcancel(1) before a cancelable syscall (kern_sig.c 969-987): EINTR, leaving the cancellation for
-// the caller's cerror to act on (libpthread's _pthread_exit_if_canceled, through __pthread_canceled(0)).
+// XNU's __pthread_testcancel(1) before a cancelable syscall (xnu-7195.141.2 kern_sig.c 969-987; xnu-12377.1.9 913):
+// EINTR, leaving the cancellation for the caller's cerror to act on (libpthread's _pthread_exit_if_canceled, through
+// __pthread_canceled(0)).
 #define CANCELATION_POINT() \
 	if (__darling_cancel_pending(__darling_cancel_flags())) \
 		return -EINTR;

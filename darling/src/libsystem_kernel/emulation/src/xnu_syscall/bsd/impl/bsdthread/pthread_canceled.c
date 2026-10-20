@@ -13,7 +13,8 @@ _Static_assert(__DARLING_CANCEL_KEY == __PTK_DARLING_CANCEL, "cancelable.h's slo
 _Static_assert(__PTK_DARLING_CANCEL * sizeof(void*) == __DARLING_CANCEL_GS_OFFSET, "the slot's offset from %gs");
 #endif
 
-// XNU's __pthread_canceled (bsd/kern/kern_sig.c 1027-1055), on the thread's own flags: no darlingserver call
+// XNU's __pthread_canceled (xnu-7195.141.2 bsd/kern/kern_sig.c 1027-1055; xnu-12377.1.9 970), on the thread's own
+// flags: no darlingserver call
 long sys_pthread_canceled(int action)
 {
 	switch (action) {
