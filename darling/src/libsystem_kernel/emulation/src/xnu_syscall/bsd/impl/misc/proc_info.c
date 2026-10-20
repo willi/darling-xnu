@@ -99,20 +99,33 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
 	}
 }
 
-long proc_identity_check(int32_t pid, uint32_t flags, uint64_t ext_id)
+// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers; the UUID is
+// the executable's LC_UUID, recorded at exec (logd files the process's format strings under it). A negative BSD errno
+// if darlingserver doesn't know the process.
+static long proc_identity_fetch(int32_t pid, struct proc_uniqidentifierinfo* info)
 {
-	uint64_t unique_id, parent_unique_id, uuid[2];
+	uint64_t uuid[2];
 	uint32_t pidversion;
 	int code;
 
-	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
+	code = dserver_rpc_proc_identity(pid, &info->p_uniqueid, &info->p_puniqueid, &pidversion, &uuid[0], &uuid[1]);
 	if (code < 0)
 		return errno_linux_to_bsd(code);
-	if (code > 0)
+	info->p_idversion = pidversion;
+	memcpy(info->p_uuid, uuid, sizeof(info->p_uuid));
+	return 0;
+}
+
+long proc_identity_check(int32_t pid, uint32_t flags, uint64_t ext_id)
+{
+	struct proc_uniqidentifierinfo info;
+	long err;
+
+	if ((err = proc_identity_fetch(pid, &info)) < 0)
+		return err;
+	if ((flags & PIF_COMPARE_IDVERSION) && ext_id != (uint32_t) info.p_idversion)
 		return -ESRCH;
-	if ((flags & PIF_COMPARE_IDVERSION) && ext_id != pidversion)
-		return -ESRCH;
-	if ((flags & PIF_COMPARE_UNIQUEID) && ext_id != unique_id)
+	if ((flags & PIF_COMPARE_UNIQUEID) && ext_id != info.p_uniqueid)
 		return -ESRCH;
 	return 0;
 }
@@ -259,27 +272,14 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 {
 #ifndef VARIANT_DYLD
-	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
-	uint64_t unique_id, parent_unique_id;
-	uint32_t pidversion;
-	uint64_t uuid[2];
-	int code;
+	long err;
 
-	if (bufsize < sizeof(*info))
+	if (bufsize < sizeof(struct proc_uniqidentifierinfo))
 		return -ENOSPC;
 
 	memset(buffer, 0, bufsize);
-
-	// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers; the UUID is
-	// the executable's LC_UUID, recorded at exec (logd files the process's format strings under it)
-	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
-	if (code < 0)
-		return errno_linux_to_bsd(code);
-
-	memcpy(info->p_uuid, uuid, sizeof(info->p_uuid));
-	info->p_uniqueid = unique_id;
-	info->p_puniqueid = parent_unique_id;
-	info->p_idversion = pidversion;
+	if ((err = proc_identity_fetch(pid, (struct proc_uniqidentifierinfo*) buffer)) < 0)
+		return err;
 #endif
 	return sizeof(struct proc_uniqidentifierinfo);
 }
