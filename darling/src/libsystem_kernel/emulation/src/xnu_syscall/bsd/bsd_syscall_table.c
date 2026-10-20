@@ -502,6 +502,7 @@ void* __bsd_syscall_table[600] = {
 	[521] = sys_abort_with_payload,
 	[524] = sys_setattrlistat,
 	[530] = sys_kqueue_workloop_ctl,
+	[545] = sys_proc_info_extended_id,
 	[553] = sys_mkfifoat,
 	[554] = sys_mknodat,
 };

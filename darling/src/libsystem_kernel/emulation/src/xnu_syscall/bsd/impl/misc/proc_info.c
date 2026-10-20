@@ -99,6 +99,43 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
 	}
 }
 
+long proc_identity_check(int32_t pid, uint32_t flags, uint64_t ext_id)
+{
+	uint64_t unique_id, parent_unique_id, uuid[2];
+	uint32_t pidversion;
+	int code;
+
+	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
+	if (code < 0)
+		return errno_linux_to_bsd(code);
+	if (code > 0)
+		return -ESRCH;
+	if ((flags & PIF_COMPARE_IDVERSION) && ext_id != pidversion)
+		return -ESRCH;
+	if ((flags & PIF_COMPARE_UNIQUEID) && ext_id != unique_id)
+		return -ESRCH;
+	return 0;
+}
+
+// XNU's proc_info_extended_id() (bsd/kern/proc_info.c): proc_info() for a process that must still be the one the caller
+// means, by pid version or unique id. libproc's proc_pidpath_audittoken() calls it with an audit token's pid version.
+// XNU checks the id only in proc_pidinfo(), and so only for PROC_INFO_CALL_PIDINFO; other calls ignore the flags.
+long sys_proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor, uint32_t flags, uint64_t ext_id,
+		uint64_t arg, void* buffer, int32_t bufsize)
+{
+	if ((flags & (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID)) == (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID))
+		return -EINVAL;
+
+	if (callnum == PROC_INFO_CALL_PIDINFO && (flags & (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID)))
+	{
+		long err = proc_identity_check(pid, flags, ext_id);
+		if (err < 0)
+			return err;
+	}
+
+	return sys_proc_info(callnum, pid, flavor, arg, buffer, bufsize);
+}
+
 // XNU's proc_terminate(), which launchd uses to stop a job: signals another process and returns the signal. XNU sends
 // SIGKILL to a process whose dirty tracking says it is clean, but Darling doesn't track that (see dirtycontrol), so it
 // sends SIGTERM, as XNU does for a process that doesn't track it.
