@@ -8,5 +8,5 @@
 long sys_guarded_open_np(const char* filename, uint64_t* guardid, unsigned int guardflags, int flags, unsigned int mode)
 {
 	*guardid = 0;
-	return sys_open(filename, flags, mode);
+	return sys_open_nocancel(filename, flags, mode);
 }

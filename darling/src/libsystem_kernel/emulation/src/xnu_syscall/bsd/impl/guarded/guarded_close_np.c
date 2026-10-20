@@ -8,5 +8,5 @@
 long sys_guarded_close_np(int fd, uint64_t* guardid)
 {
 	*guardid = 0;
-	return sys_close(fd);
+	return sys_close_nocancel(fd);
 }

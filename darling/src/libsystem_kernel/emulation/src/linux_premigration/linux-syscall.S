@@ -74,3 +74,52 @@ _linux_syscall:
 #	error Missing assembly!
 
 #endif
+
+// linux_syscall for a cancelable syscall's blocking call (bsdthread/cancelable.h): the same, with XNU's test for a
+// cancellation to act on (xnu-7195.141.2 bsd/kern/kern_sig.c 977) in the range [___darling_cp_begin,
+// ___darling_cp_end), which ends right after the syscall instruction. A signal handler's return (sig_restorer.S) moves
+// a thread with a cancellation to act on that it finds in that range to ___darling_cp_cancel, which returns -EINTR:
+// whether the thread is before the syscall or blocked in it (the kernel rewinds an interrupted syscall to its
+// instruction, to restart it: the handlers are SA_RESTART). A finished syscall is past the range, and its result
+// stands.
+#include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
+#define LINUX_EINTR	4
+
+#if defined(__x86_64__)
+
+.globl _linux_syscall_cp
+.private_extern _linux_syscall_cp
+.globl ___darling_cp_begin
+.private_extern ___darling_cp_begin
+.globl ___darling_cp_end
+.private_extern ___darling_cp_end
+.globl ___darling_cp_cancel
+.private_extern ___darling_cp_cancel
+
+_linux_syscall_cp:
+	movl	8(%rsp), %eax
+	movq	%rcx, %r10
+___darling_cp_begin:
+	movq	%gs:__DARLING_CANCEL_GS_OFFSET, %r11
+	andq	$__DARLING_CANCEL_TEST, %r11
+	cmpq	$__DARLING_CANCEL_ACT, %r11
+	je	___darling_cp_cancel
+	syscall
+___darling_cp_end:
+	ret
+___darling_cp_cancel:
+	movq	$-LINUX_EINTR, %rax
+	ret
+
+#elif defined(__i386__)
+
+// only the test before the syscall (CANCELATION_POINT); a blocked syscall isn't interrupted
+.globl _linux_syscall_cp
+.private_extern _linux_syscall_cp
+_linux_syscall_cp:
+	jmp	_linux_syscall
+
+#else
+#	error Missing assembly!
+
+#endif

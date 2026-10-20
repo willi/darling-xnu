@@ -243,10 +243,10 @@ sysctl_handler(handle_bootsessionuuid)
 	char uuid[37];
 	int fd, rd, i;
 
-	fd = sys_open("/proc/sys/kernel/random/boot_id", BSD_O_RDONLY, 0);
+	fd = sys_open_nocancel("/proc/sys/kernel/random/boot_id", BSD_O_RDONLY, 0);
 	if (fd < 0)
 		return fd;
-	rd = sys_read(fd, uuid, sizeof(uuid) - 1);
+	rd = sys_read_nocancel(fd, uuid, sizeof(uuid) - 1);
 	close_internal(fd);
 	if (rd < (int) sizeof(uuid) - 1)
 		return -ENOENT;
@@ -337,7 +337,7 @@ sysctl_handler(handle_domainname)
 sysctl_handler(handle_maxproc)
 {
 	char buf[16];
-	int fd = sys_open("/proc/sys/kernel/pid_max", BSD_O_RDONLY, 0);
+	int fd = sys_open_nocancel("/proc/sys/kernel/pid_max", BSD_O_RDONLY, 0);
 	int value = 1024;
 	int* ovalue = (int*) old;
 	
@@ -346,7 +346,7 @@ sysctl_handler(handle_maxproc)
 	
 	if (fd >= 0)
 	{
-		int rd = sys_read(fd, buf, sizeof(buf) - 1);
+		int rd = sys_read_nocancel(fd, buf, sizeof(buf) - 1);
 		close_internal(fd);
 		
 		if (rd > 0)

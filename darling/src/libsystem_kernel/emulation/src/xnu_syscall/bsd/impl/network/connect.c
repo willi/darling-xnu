@@ -24,13 +24,20 @@ void kqueue_socket_changed(int fd) {}
 #include <darling/emulation/linux_premigration/vchroot_expand.h>
 #include <darling/emulation/common/bsdthread/per_thread_wd.h>
 
+static long connect_body(int fd, const void* name, int socklen, int cp);
+
 long sys_connect(int fd, const void* name, int socklen)
 {
 	CANCELATION_POINT();
-	return sys_connect_nocancel(fd, name, socklen);
+	return connect_body(fd, name, socklen, 1);
 }
 
 long sys_connect_nocancel(int fd, const void* name, int socklen)
+{
+	return connect_body(fd, name, socklen, 0);
+}
+
+static long connect_body(int fd, const void* name, int socklen, int cp)
 {
 	int ret;
 	int linux_domain;
@@ -45,9 +52,9 @@ long sys_connect_nocancel(int fd, const void* name, int socklen)
 		return ret;
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_CONNECT, ((long[6]) { fd, fixed, socklen }));
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_CONNECT, ((long[6]) { fd, fixed, socklen }));
 #else
-	ret = LINUX_SYSCALL(__NR_connect, fd, fixed, socklen);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_connect, fd, fixed, socklen);
 #endif
 
 	if (ret < 0)

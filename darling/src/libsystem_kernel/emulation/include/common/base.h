@@ -27,6 +27,19 @@
 
 long linux_syscall(long a1, long a2, long a3, long a4, long a5, long a6, int nr);
 
+// The blocking call of a cancelable syscall (linux-syscall.S): LINUX_SYSCALL_CP is LINUX_SYSCALL for it.
+long linux_syscall_cp(long a1, long a2, long a3, long a4, long a5, long a6, int nr);
+#define LINUX_SYSCALL_CP0(nr) linux_syscall_cp(0, 0, 0, 0, 0, 0, nr)
+#define LINUX_SYSCALL_CP1(nr, a1) linux_syscall_cp((long)a1, 0, 0, 0, 0, 0, nr)
+#define LINUX_SYSCALL_CP2(nr, a1, a2) linux_syscall_cp((long)a1, (long)a2, 0, 0, 0, 0, nr)
+#define LINUX_SYSCALL_CP3(nr, a1, a2, a3) linux_syscall_cp((long)a1, (long)a2, (long)a3, 0, 0, 0, nr)
+#define LINUX_SYSCALL_CP4(nr, a1, a2, a3, a4) linux_syscall_cp((long)a1, (long)a2, (long)a3, (long)a4, 0, 0, nr)
+#define LINUX_SYSCALL_CP5(nr, a1, a2, a3, a4, a5) linux_syscall_cp((long)a1, (long)a2, (long)a3, (long)a4, (long)a5, 0, nr)
+#define LINUX_SYSCALL_CP6(nr, a1, a2, a3, a4, a5, a6) linux_syscall_cp((long)a1, (long)a2, (long)a3, (long)a4, (long)a5, (long)a6, nr)
+#define LINUX_SYSCALL_CP(...) __SYSCALL_CONCAT(LINUX_SYSCALL_CP,__SYSCALL_NARGS(__VA_ARGS__))(__VA_ARGS__)
+// LINUX_SYSCALL_CP when cp, else LINUX_SYSCALL: for code that both a syscall and its _nocancel variant run
+#define LINUX_SYSCALL_MAYBE_CP(cp, ...) ((cp) ? LINUX_SYSCALL_CP(__VA_ARGS__) : LINUX_SYSCALL(__VA_ARGS__))
+
 #ifndef BUILDING_BASE_C
 
 VISIBLE

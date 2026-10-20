@@ -53,12 +53,12 @@ static int kqworkq_setup(void)
 	kq = sys_kqueue();
 	if (kq < 0)
 		return kq;
-	sys_fcntl(kq, F_SETFD, FD_CLOEXEC);
+	sys_fcntl_nocancel(kq, F_SETFD, FD_CLOEXEC);
 
 	wakefd = LINUX_SYSCALL(__NR_eventfd2, 0, LINUX_EFD_NONBLOCK | LINUX_EFD_CLOEXEC);
 	if (wakefd < 0)
 	{
-		sys_close(kq);
+		sys_close_nocancel(kq);
 		return errno_linux_to_bsd(wakefd);
 	}
 

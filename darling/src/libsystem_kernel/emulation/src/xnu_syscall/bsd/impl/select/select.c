@@ -7,13 +7,20 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
+static long select_body(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout, int cp);
+
 long sys_select(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout)
 {
 	CANCELATION_POINT();
-	return sys_select_nocancel(nfds, rfds, wfds, efds, timeout);
+	return select_body(nfds, rfds, wfds, efds, timeout, 1);
 }
 
 long sys_select_nocancel(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout)
+{
+	return select_body(nfds, rfds, wfds, efds, timeout, 0);
+}
+
+static long select_body(int nfds, void* rfds, void* wfds, void* efds, struct bsd_timeval* timeout, int cp)
 {
 	#if defined(__NR__newselect) || defined(__NR_select)
 		int ret;
@@ -26,10 +33,10 @@ long sys_select_nocancel(int nfds, void* rfds, void* wfds, void* efds, struct bs
 		}
 
 		#if defined(__NR__newselect)
-			ret = LINUX_SYSCALL(__NR__newselect, nfds, rfds, wfds, efds,
+			ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR__newselect, nfds, rfds, wfds, efds,
 					(timeout != NULL) ? &ltv : NULL);
 		#else
-			ret = LINUX_SYSCALL(__NR_select, nfds, rfds, wfds, efds,
+			ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_select, nfds, rfds, wfds, efds,
 					(timeout != NULL) ? &ltv : NULL);
 		#endif
 		if (ret < 0)

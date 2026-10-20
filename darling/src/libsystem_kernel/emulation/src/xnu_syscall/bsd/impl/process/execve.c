@@ -90,15 +90,14 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 		return ret;
 
 	char shebang[256];
-	int fd = sys_open(fname, BSD_O_RDONLY, 0);
+	int fd = sys_open_nocancel(fname, BSD_O_RDONLY, 0);
 	if (fd < 0)
 		return fd;
 
-	ret = sys_read(fd, shebang, sizeof(shebang));
+	ret = sys_read_nocancel(fd, shebang, sizeof(shebang));
+	close_internal(fd);
 	if (ret < 0)
 		return ret;
-
-	close_internal(fd);
 
 	bool is_script = false;
 	bool is_macho = false;
@@ -249,9 +248,12 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 	// otherwise it's a Linux executable (ELF or something else binfmt handles);
 	// this is the default
 
-	linux_sigset_t set;
-	set = (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
-	set |= (1ull << (SIGNAL_S2C-1));
+	// Darling's own signals, blocked across the exec: each would end the new image (its default action) before its
+	// sigexc_setup installs the handlers. pthread_markcancel's stays pending across the exec, and that sigexc_setup
+	// discards it (handle_cancel_signal): XNU drops a thread's cancellation across an exec, which runs the new image on
+	// a new, zeroed uthread and copies only its signal state (xnu-12377.1.9 bsd/kern/kern_exec.c 5177-5182). A failed
+	// exec unblocks them here, and the thread, which XNU keeps, is marked.
+	linux_sigset_t set = DARLING_PRIVATE_SIGSET;
 
 	// darlingserver needs to know whether the execve completes successfully or not.
 	// since pidfds don't notify on execve, we have to use a pipe with close-on-exec

@@ -18,13 +18,20 @@ extern void* memcpy(void* dest, const void* src, __SIZE_TYPE__ len);
 
 #define ALIGN(what, how) ( ((what) + (how) - 1) & ~((how) - 1) )
 
+static long recvmsg_body(int socket, struct bsd_msghdr* msg, int flags, int cp);
+
 long sys_recvmsg(int socket, struct bsd_msghdr* msg, int flags)
 {
 	CANCELATION_POINT();
-	return sys_recvmsg_nocancel(socket, msg, flags);
+	return recvmsg_body(socket, msg, flags, 1);
 }
 
 long sys_recvmsg_nocancel(int socket, struct bsd_msghdr* msg, int flags)
+{
+	return recvmsg_body(socket, msg, flags, 0);
+}
+
+static long recvmsg_body(int socket, struct bsd_msghdr* msg, int flags, int cp)
 {
 	int ret, linux_flags;
 	struct linux_msghdr lmsg;
@@ -58,10 +65,10 @@ long sys_recvmsg_nocancel(int socket, struct bsd_msghdr* msg, int flags)
 	linux_flags = msgflags_bsd_to_linux(flags);
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_RECVMSG,
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_RECVMSG,
 			((long[6]) { socket, &lmsg, linux_flags }));
 #else
-	ret = LINUX_SYSCALL(__NR_recvmsg, socket, &lmsg, linux_flags);
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_recvmsg, socket, &lmsg, linux_flags);
 #endif
 
 	if (ret < 0)

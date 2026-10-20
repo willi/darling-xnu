@@ -129,11 +129,11 @@ bool read_string(const char* path, char* dst, int maxlen)
 {
 	int fd, rd;
 
-	fd = sys_open(path, BSD_O_RDONLY, 0);
+	fd = sys_open_nocancel(path, BSD_O_RDONLY, 0);
 	if (fd < 0)
 		return false;
 
-	rd = sys_read(fd, dst, maxlen-1);
+	rd = sys_read_nocancel(fd, dst, maxlen-1);
 	if (rd >= 0)
 		dst[rd] = '\0';
 

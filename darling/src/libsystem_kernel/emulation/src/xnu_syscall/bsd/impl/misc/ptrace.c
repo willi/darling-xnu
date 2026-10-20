@@ -89,7 +89,7 @@ long sys_ptrace(int request, int pid, void* addr, int data)
 			{
 				// Call wait4 to process the SIGSTOP that is sent by kernel on PTRACE_ATTACH
 				// and make sure it is passed to the tracee (to get it sent back to us as a Mach message).
-				sys_wait4(pid, NULL, DARLING_WAIT_NORESTART | BSD_WSTOPPED, NULL);
+				sys_wait4_nocancel(pid, NULL, DARLING_WAIT_NORESTART | BSD_WSTOPPED, NULL);
 			}
 			*/
 			ret = -ENOSYS;

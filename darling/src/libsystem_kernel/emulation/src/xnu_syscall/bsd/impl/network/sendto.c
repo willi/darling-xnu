@@ -14,15 +14,24 @@
 
 extern void *memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
 
+static long sendto_body(int fd, const void* buffer, unsigned long length,
+		int flags, const void* sockaddr, int socklen, int cp);
+
 long sys_sendto(int fd, const void* buffer, unsigned long length,
 		int flags, const void* sockaddr, int socklen)
 {
 	CANCELATION_POINT();
-	return sys_sendto_nocancel(fd, buffer, length, flags, sockaddr, socklen);
+	return sendto_body(fd, buffer, length, flags, sockaddr, socklen, 1);
 }
 
 long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 		int flags, const void* sockaddr, int socklen)
+{
+	return sendto_body(fd, buffer, length, flags, sockaddr, socklen, 0);
+}
+
+static long sendto_body(int fd, const void* buffer, unsigned long length,
+		int flags, const void* sockaddr, int socklen, int cp)
 {
 	int ret, linux_flags, local_dgram;
 
@@ -45,10 +54,10 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
 	linux_flags = local_dgram_send_flags(fd, msgflags_bsd_to_linux(flags) | LINUX_MSG_NOSIGNAL, &local_dgram);
 
 #ifdef __NR_socketcall
-	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDTO,
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_socketcall, LINUX_SYS_SENDTO,
 			((long[6]) { fd, buffer, length, linux_flags, fixed, socklen }));
 #else
-	ret = LINUX_SYSCALL(__NR_sendto, fd, buffer, length,
+	ret = LINUX_SYSCALL_MAYBE_CP(cp, __NR_sendto, fd, buffer, length,
 			linux_flags, fixed, socklen);
 #endif
 
