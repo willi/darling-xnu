@@ -77,10 +77,10 @@ _linux_syscall:
 
 // linux_syscall for a cancelable syscall's blocking call (bsdthread/cancelable.h): the same, with XNU's test for a
 // cancellation to act on (bsd/kern/kern_sig.c 977) in the range [___darling_cp_begin, ___darling_cp_end), which ends
-// right after the syscall instruction. The cancel signal's handler (sigexc.c) moves a thread it finds in that range to
-// ___darling_cp_cancel, which returns -EINTR: whether the thread is before the syscall or blocked in it (the kernel
-// rewinds an interrupted syscall to its instruction, to restart it: the handler is SA_RESTART). A finished syscall is
-// past the range, and its result stands.
+// right after the syscall instruction. A signal handler's return (sig_restorer.S) moves a thread with a cancellation
+// to act on that it finds in that range to ___darling_cp_cancel, which returns -EINTR: whether the thread is before
+// the syscall or blocked in it (the kernel rewinds an interrupted syscall to its instruction, to restart it: the
+// handlers are SA_RESTART). A finished syscall is past the range, and its result stands.
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 #define LINUX_EINTR	4
 

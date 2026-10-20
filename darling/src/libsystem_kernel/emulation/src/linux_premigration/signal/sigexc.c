@@ -129,15 +129,14 @@ static void handle_rt_signal(int signum)
 }
 
 #if defined(__x86_64__)
-// linux-syscall.S's cancelable syscall entry
-extern char __darling_cp_begin[], __darling_cp_end[], __darling_cp_cancel[];
+_Static_assert(__builtin_offsetof(struct linux_ucontext, uc_mcontext.gregs.rip) == 168, "sig_restorer.S's UC_RIP");
 #endif
 
 // darlingserver's pthread_markcancel, on the thread it marks: XNU's __pthread_markcancel (bsd/kern/kern_sig.c
 // 1009-1015) for that thread. The mark is set unless the thread was marked already or has acted on one. Then, unless
-// cancellation is disabled, thread_abort_safely's part: a thread in a cancelable syscall's blocking call
-// (linux_syscall_cp) leaves it with EINTR, which its cerror acts on. Elsewhere the thread is not in a cancellation
-// point (XNU's UT_NOTCANCELPT), and the next one acts on the mark.
+// cancellation is disabled, thread_abort_safely's part, which is the handler's return through sig_restorer.S: a thread
+// in a cancelable syscall's blocking call (linux_syscall_cp) leaves it with EINTR, which its cerror acts on. Elsewhere
+// the thread is not in a cancellation point (XNU's UT_NOTCANCELPT), and the next one acts on the mark.
 static void cancel_handler(int signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
 {
 	unsigned long flags = __darling_cancel_flags();
@@ -145,14 +144,6 @@ static void cancel_handler(int signum, struct linux_siginfo* info, struct linux_
 	if (flags & (DARLING_UT_CANCEL | DARLING_UT_CANCELED))
 		return;
 	__darling_cancel_flags_set(DARLING_UT_CANCEL);
-	if (flags & DARLING_UT_CANCELDISABLE)
-		return;
-
-#if defined(__x86_64__)
-	char* pc = (char*) ctxt->uc_mcontext.gregs.rip;
-	if (pc >= __darling_cp_begin && pc < __darling_cp_end)
-		ctxt->uc_mcontext.gregs.rip = (unsigned long) __darling_cp_cancel;
-#endif
 }
 
 // SA_RESTART, so that the syscalls the signal interrupts outside a cancellation point carry on as if it hadn't come
