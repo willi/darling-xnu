@@ -5,6 +5,7 @@
 #include <mach/mach_init.h>
 #include <sys/errno.h>
 
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/host_basic_info.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_kern.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
 #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
@@ -42,7 +43,8 @@ static sysctl_handler(handle_machine);
 static sysctl_handler(handle_cpufrequency);
 
 const struct known_sysctl sysctls_hw[] = {
-	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
+	// XNU registers HW_AVAILCPU as hw.activecpu (bsd/kern/kern_mib.c); "availcpu" is only its CTL_HW_NAMES label
+	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
 	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_availcpu },
 	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
 	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
@@ -59,55 +61,47 @@ const struct known_sysctl sysctls_hw[] = {
 	{ .oid = -1 }
 };
 
-static const struct host_basic_info* gethostinfo(void)
+// Zeros if darlingserver didn't answer, as before; host_basic_info_get() keeps the first answer.
+static struct host_basic_info gethostinfo(void)
 {
-	static struct host_basic_info hinfo;
+	struct host_basic_info hinfo;
 
-	if (!hinfo.avail_cpus)
-	{
-		mach_msg_type_number_t hcount = HOST_BASIC_INFO_COUNT;
-		mach_port_t hself;
-
-		hself = mach_host_self();
-		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
-		mach_port_deallocate(mach_task_self(), hself);
-	}
-
-	return &hinfo;
+	host_basic_info_get(&hinfo);
+	return hinfo;
 }
 
 sysctl_handler(handle_availcpu)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->avail_cpus;
+	*((int*) old) = gethostinfo().avail_cpus;
 	return 0;
 }
 
 sysctl_handler(handle_physicalcpu)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->physical_cpu;
+	*((int*) old) = gethostinfo().physical_cpu;
 	return 0;
 }
 
 sysctl_handler(handle_physicalcpu_max)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->physical_cpu_max;
+	*((int*) old) = gethostinfo().physical_cpu_max;
 	return 0;
 }
 
 sysctl_handler(handle_logicalcpu)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->logical_cpu;
+	*((int*) old) = gethostinfo().logical_cpu;
 	return 0;
 }
 
 sysctl_handler(handle_logicalcpu_max)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->logical_cpu_max;
+	*((int*) old) = gethostinfo().logical_cpu_max;
 	return 0;
 }
 
@@ -115,7 +109,7 @@ sysctl_handler(handle_memsize)
 {
 
 	sysctl_handle_size(sizeof(unsigned long long));
-	*((unsigned long long*) old) = gethostinfo()->max_mem;
+	*((unsigned long long*) old) = gethostinfo().max_mem;
 	return 0;
 }
 
@@ -151,21 +145,21 @@ sysctl_handler(handle_pagesize)
 sysctl_handler(handle_cputype)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->cpu_type;
+	*((int*) old) = gethostinfo().cpu_type;
 	return 0;
 }
 
 sysctl_handler(handle_cpusubtype)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->cpu_subtype;
+	*((int*) old) = gethostinfo().cpu_subtype;
 	return 0;
 }
 
 sysctl_handler(handle_cputhreadtype)
 {
 	sysctl_handle_size(sizeof(int));
-	*((int*) old) = gethostinfo()->cpu_threadtype;
+	*((int*) old) = gethostinfo().cpu_threadtype;
 	return 0;
 }
 

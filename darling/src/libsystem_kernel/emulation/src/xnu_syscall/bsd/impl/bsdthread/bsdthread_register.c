@@ -1,8 +1,13 @@
+// THREAD_QOS_* and pthread_priority_t's encoding are PRIVATE in mach/thread_policy.h and pthread/priority_private.h
+#define PRIVATE 1
+#define __PTHREAD_EXPOSE_INTERNALS__ 1
 #include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.h>
 
 #include <sys/errno.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <pthread/tsd_private.h>
+#include <pthread/priority_private.h>
 
 #include <darling/emulation/common/base.h>
 #include <darling/emulation/conversion/errno.h>
@@ -67,13 +72,43 @@ static int workq_supported_features(void)
 }
 
 long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
-		const struct _pthread_registration_data* pth_regdata,
+		struct _pthread_registration_data* pth_regdata,
 		unsigned long pth_regdata_len, unsigned long long dpq_offset)
 {
+	// The registration data is read and written by the size the caller passed, and its version must be that
+	// size, as XNU's bsdthread_register does (libpthread-539 kern/kern_support.c 557-570 and 626-663): a zeroed
+	// copy, kept only once it's valid, so a rejected registration leaves the previous one in place.
+	struct _pthread_registration_data data = {0};
+	size_t regdata_size = 0;
+	if (pth_regdata != NULL) {
+		if (pth_regdata_len < sizeof(pth_regdata->version))
+			return -EINVAL;
+		regdata_size = pth_regdata_len < sizeof(data) ? pth_regdata_len : sizeof(data);
+		// not memcpy: the SDK's fortified macro makes a variable-length one __memcpy_chk, which dyld's static
+		// link of this file doesn't have
+		__builtin_memcpy(&data, pth_regdata, regdata_size);
+		if (data.version != pth_regdata_len)
+			return -EINVAL;
+	} else {
+		data.dispatch_queue_offset = dpq_offset;
+	}
+	g_pth_regdata = data;
+
 	pthread_obj_size = pthsize;
 	pthread_entry_point = (bsdthread_entry_t) thread_start;
 	wqueue_entry_point = (bsdwqthread_entry_t) wqthread;
-	g_pth_regdata = *pth_regdata;
+
+	// The main thread's QoS goes back to libpthread, which keeps it for qos_class_main() and the main thread's QoS
+	// TSD slot. XNU answers the QoS exec gave the main thread (task_compute_main_thread_qos, from the spawn's process
+	// type: user-interactive for an app, legacy for a daemon, background for a background daemon, lowered by a spawn
+	// QoS clamp), or legacy, which it imposes, when there is none. Darling carries neither the process type nor the
+	// clamp across a spawn, so every process gets legacy: XNU's answer for a daemon or a plain binary, one tier low
+	// for an app. Before this, the 0 here made qos_class_main() QOS_CLASS_UNSPECIFIED in every process.
+	// XNU also writes back version, stack_addr_hint and mutex_default_policy. libpthread doesn't read version back,
+	// and 0 is the default for the other two (libpthread keeps its own stack hint; the default mutex policy is 0
+	// unless a boot-arg sets it), so leaving them is XNU's answer too.
+	if (regdata_size >= offsetof(struct _pthread_registration_data, main_qos) + sizeof(pth_regdata->main_qos))
+		pth_regdata->main_qos = _pthread_priority_make_from_thread_qos(THREAD_QOS_LEGACY, 0, 0);
 
 	uintptr_t pthread_handle = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
 	uintptr_t dispatch_qaddr = pthread_handle + g_pth_regdata.tsd_offset + g_pth_regdata.dispatch_queue_offset;
