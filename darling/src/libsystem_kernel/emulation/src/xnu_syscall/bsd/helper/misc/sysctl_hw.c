@@ -42,7 +42,8 @@ static sysctl_handler(handle_machine);
 static sysctl_handler(handle_cpufrequency);
 
 const struct known_sysctl sysctls_hw[] = {
-	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
+	// XNU registers HW_AVAILCPU as hw.activecpu (bsd/kern/kern_mib.c); "availcpu" is only its CTL_HW_NAMES label
+	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
 	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_availcpu },
 	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
 	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
