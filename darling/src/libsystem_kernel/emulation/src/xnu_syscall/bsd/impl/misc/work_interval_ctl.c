@@ -85,7 +85,7 @@ static long create(struct work_interval_create_params* params)
 		static bool told;
 
 		if (!__atomic_exchange_n(&told, true, __ATOMIC_RELAXED))
-			__simple_printf("work_interval_ctl: joinable work intervals (flags %#x) are not supported: ENOTSUP\n", flags);
+			__simple_printf("work_interval_ctl: joinable work intervals (flags 0x%x) are not supported: ENOTSUP\n", flags);
 		return -ENOTSUP;
 	}
 
