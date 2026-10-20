@@ -212,7 +212,7 @@ static void wl_put(struct workloop* wl)
 	if (idle)
 	{
 		if (wl->kq >= 0)
-			sys_close(wl->kq);
+			sys_close_nocancel(wl->kq);
 		kevent_dd_destroy(&wl->dd);
 		free(wl);
 	}
@@ -680,14 +680,14 @@ static int wl_register_normal(struct workloop* wl, struct kevent_qos_s* kev)
 		kq = sys_kqueue();
 		if (kq < 0)
 			return -kq;
-		sys_fcntl(kq, F_SETFD, FD_CLOEXEC);
+		sys_fcntl_nocancel(kq, F_SETFD, FD_CLOEXEC);
 
 		wl->kq = kq;
 		error = wl_watch_kq(wl, LINUX_EPOLL_CTL_ADD);
 		if (error)
 		{
 			wl->kq = -1;
-			sys_close(kq);
+			sys_close_nocancel(kq);
 			return error;
 		}
 		wl->kq_armed = true;

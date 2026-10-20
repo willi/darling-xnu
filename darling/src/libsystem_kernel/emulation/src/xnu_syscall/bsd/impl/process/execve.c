@@ -90,11 +90,11 @@ long sys_execve_spawn(const char* fname, const char** argvp, const char** envp, 
 		return ret;
 
 	char shebang[256];
-	int fd = sys_open(fname, BSD_O_RDONLY, 0);
+	int fd = sys_open_nocancel(fname, BSD_O_RDONLY, 0);
 	if (fd < 0)
 		return fd;
 
-	ret = sys_read(fd, shebang, sizeof(shebang));
+	ret = sys_read_nocancel(fd, shebang, sizeof(shebang));
 	if (ret < 0)
 		return ret;
 

@@ -121,5 +121,5 @@ int sys_open_by_handle(RefData* ref, int flags)
 	int ret = sys_handle_to_name(ref, name);
 	if (ret < 0)
 		return ret;
-	return sys_open(name, flags, 0);
+	return sys_open_nocancel(name, flags, 0);
 }

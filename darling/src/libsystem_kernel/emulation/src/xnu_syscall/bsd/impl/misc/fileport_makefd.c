@@ -17,6 +17,6 @@ long sys_fileport_makefd(int port)
 		return errno_linux_to_bsd(code);
 
 	// as XNU's (the descriptor arrives without it)
-	sys_fcntl(fd, F_SETFD, FD_CLOEXEC);
+	sys_fcntl_nocancel(fd, F_SETFD, FD_CLOEXEC);
 	return fd;
 }
