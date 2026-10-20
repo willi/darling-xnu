@@ -15,12 +15,10 @@
 // syscall with EINTR. That is how the cancel signal's handler interrupts the call (sigexc.c, cancel_handler), and how
 // a cancel that came while another handler ran does: its pc was in that handler, and the syscall that handler
 // interrupted, rewound to its instruction by SA_RESTART, would block again past the test at ___darling_cp_begin.
-// rt_sigreturn restores every register, so these are free.
+// rt_sigreturn restores every register, so these are free. The range comes first: only a thread in it is known to
+// have its TSD at %gs. A signal also comes to threads that have none yet, or none any more: darlingserver's suspend of
+// a thread that is exiting, as Darling's thread_suspend_exited test does 300 times, crashed in the %gs read.
 _sig_restorer:
-	movq	%gs:__DARLING_CANCEL_GS_OFFSET, %r11
-	andq	$__DARLING_CANCEL_TEST, %r11
-	cmpq	$__DARLING_CANCEL_ACT, %r11
-	jne	1f
 	movq	UC_RIP(%rsp), %r11
 	leaq	___darling_cp_begin(%rip), %rax
 	cmpq	%rax, %r11
@@ -28,6 +26,10 @@ _sig_restorer:
 	leaq	___darling_cp_end(%rip), %rax
 	cmpq	%rax, %r11
 	jae	1f
+	movq	%gs:__DARLING_CANCEL_GS_OFFSET, %r11
+	andq	$__DARLING_CANCEL_TEST, %r11
+	cmpq	$__DARLING_CANCEL_ACT, %r11
+	jne	1f
 	leaq	___darling_cp_cancel(%rip), %rax
 	movq	%rax, UC_RIP(%rsp)
 1:
