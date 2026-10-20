@@ -118,4 +118,7 @@ ___darling_cp_cancel:
 _linux_syscall_cp:
 	jmp	_linux_syscall
 
+#else
+#	error Missing assembly!
+
 #endif
