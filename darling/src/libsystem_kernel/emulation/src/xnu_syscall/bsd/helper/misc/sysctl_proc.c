@@ -189,6 +189,22 @@ void skip_stat_elems(char** buf, int count)
 		next_stat_elem(buf);
 }
 
+long proc_stat_ppid(int32_t pid)
+{
+	char path[64], stat[1024];
+	char* statptr = stat;
+	const char* elem;
+
+	__simple_sprintf(path, "/proc/%d/stat", pid);
+	if (!read_string(path, stat, sizeof(stat)))
+		return -ESRCH;
+	skip_stat_elems(&statptr, 3); // pid, comm, state
+	elem = next_stat_elem(&statptr);
+	if (!elem)
+		return -ESRCH;
+	return __simple_atoi(elem, NULL);
+}
+
 static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
 {
 	char path[56];

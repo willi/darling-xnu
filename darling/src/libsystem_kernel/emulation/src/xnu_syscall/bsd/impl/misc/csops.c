@@ -4,6 +4,7 @@
 #include <mach-o/loader.h>
 #include <sys/codesign.h>
 #include <sys/errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 #include <strings.h>
@@ -14,8 +15,8 @@
 #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/executable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sha256.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
-#include <darlingserver/rpc.h>
 
 #ifndef CS_OPS_DER_ENTITLEMENTS_BLOB
 #define CS_OPS_DER_ENTITLEMENTS_BLOB 16
@@ -375,19 +376,16 @@ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
 }
 
 long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token) {
-	uint64_t unique_id, parent_unique_id, uuid[2];
-	uint32_t pidversion;
-	int code;
+	long err;
 
 	if (audit_token == NULL)
 		return -EINVAL;
 
 	// as XNU checks: the token must be for the process the pid names now, not one that died and left its pid to another
-	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
-	if (code < 0)
-		return errno_linux_to_bsd(code);
-	if (code > 0 || audit_token->val[5] != (unsigned int) pid || audit_token->val[7] != pidversion)
+	if (audit_token->val[5] != (unsigned int) pid)
 		return -ESRCH;
+	if ((err = proc_identity_check(pid, PIF_COMPARE_IDVERSION, audit_token->val[7])) < 0)
+		return err;
 
 	return sys_csops(pid, ops, useraddr, usersize);
 }

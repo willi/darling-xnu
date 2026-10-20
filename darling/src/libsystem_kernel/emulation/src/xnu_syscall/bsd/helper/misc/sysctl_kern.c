@@ -53,6 +53,7 @@ static sysctl_handler(handle_osproductversion);
 static sysctl_handler(handle_osrevision);
 static sysctl_handler(handle_bootargs);
 static sysctl_handler(handle_bootsessionuuid);
+static sysctl_handler(handle_hostid);
 
 extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
 extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
@@ -75,6 +76,7 @@ const struct known_sysctl sysctls_kern[] = {
 	{ .oid = KERN_BOOTTIME, .type = CTLTYPE_STRUCT, .exttype = "S,timeval", .name = "boottime", .handler = handle_boottime },
 	{ .oid = KERN_OSTYPE, .type = CTLTYPE_STRING, .exttype = "S", .name = "ostype", .handler = handle_ostype },
 	{ .oid = KERN_HOSTNAME, .type = CTLTYPE_STRING, .exttype = "S", .name = "hostname", .handler = handle_hostname },
+	{ .oid = KERN_HOSTID, .type = CTLTYPE_INT, .exttype = "I", .name = "hostid", .handler = handle_hostid },
 	{ .oid = KERN_DOMAINNAME, .type = CTLTYPE_STRING, .exttype = "S", .name = "domainname", .handler = handle_domainname },
 	{ .oid = KERN_OSRELEASE, .type = CTLTYPE_STRING, .exttype = "S", .name = "osrelease", .handler = handle_osrelease },
 	{ .oid = KERN_VERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "version", .handler = handle_version },
@@ -433,5 +435,21 @@ static sysctl_handler(handle_osrevision) {
 	if (ovalue)
 		*ovalue = EMULATED_OSREVISION;
 	*oldlen = sizeof(*ovalue);
+	return 0;
+}
+
+// XNU's kern.hostid (kern_sysctl.c): a system-wide int, 0 until root sets it. libbsm's audit_set_terminal_host() reads
+// it for every audit token's terminal. A write is EPERM, which XNU also answers to a writer that isn't root (the
+// sysctl is CTLFLAG_RW without CTLFLAG_ANYBODY); only a root writer differs. Nothing here writes it. Making it
+// writable would mean keeping the value in darlingserver, not in this process.
+static sysctl_handler(handle_hostid) {
+	int* ovalue = (int*)old;
+	if (_new && newlen > 0)
+		return -EPERM;
+	if (!oldlen)
+		return -EINVAL;
+	if (ovalue && *oldlen >= sizeof(int))
+		*ovalue = 0;
+	*oldlen = sizeof(int);
 	return 0;
 }

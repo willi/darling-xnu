@@ -39,7 +39,11 @@
 
 #define LINUX_PR_SET_NAME 15
 
-static long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize);
+static long proc_info_internal(uint32_t callnum, int32_t pid, uint32_t flags, uint64_t ext_id, uint32_t flavor,
+		uint64_t arg, void* buffer, int32_t bufsize);
+static long _proc_pidinfo(int32_t pid, uint32_t flags, uint64_t ext_id, uint32_t flavor, uint64_t arg, void* buffer,
+		int32_t bufsize);
+static long _proc_pidinfo_fill(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize);
 static long _proc_terminate(int32_t pid);
 
 extern __SIZE_TYPE__ strlen(const char *s);
@@ -51,6 +55,14 @@ extern int strncmp (const char * str1, const char * str2, __SIZE_TYPE__ num);
 extern char *strchr(char *str, int character);
 
 long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+		uint64_t arg, void* buffer, int32_t bufsize)
+{
+	return proc_info_internal(callnum, pid, 0, 0, flavor, arg, buffer, bufsize);
+}
+
+// XNU's proc_info_internal(): proc_info() and proc_info_extended_id() both come here, and only proc_pidinfo() looks at
+// the flags
+static long proc_info_internal(uint32_t callnum, int32_t pid, uint32_t flags, uint64_t ext_id, uint32_t flavor,
 		uint64_t arg, void* buffer, int32_t bufsize)
 {
 	switch (callnum)
@@ -89,7 +101,7 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
 		case 8: // dirtycontrol
 			return 0;
 		case 2: // proc_pidinfo
-			return _proc_pidinfo(pid, flavor, arg, buffer, bufsize);
+			return _proc_pidinfo(pid, flags, ext_id, flavor, arg, buffer, bufsize);
 		case 3: // proc_pidfdinfo
 		case 1: // proc_listpids
 		default:
@@ -97,6 +109,48 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
 					callnum);
 			return -ENOTSUP;
 	}
+}
+
+// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers; the UUID is
+// the executable's LC_UUID, recorded at exec (logd files the process's format strings under it). A negative BSD errno
+// if darlingserver doesn't know the process.
+static long proc_identity_fetch(int32_t pid, struct proc_uniqidentifierinfo* info)
+{
+	uint64_t uuid[2];
+	uint32_t pidversion;
+	int code;
+
+	code = dserver_rpc_proc_identity(pid, &info->p_uniqueid, &info->p_puniqueid, &pidversion, &uuid[0], &uuid[1]);
+	if (code < 0)
+		return errno_linux_to_bsd(code);
+	info->p_idversion = pidversion;
+	memcpy(info->p_uuid, uuid, sizeof(info->p_uuid));
+	return 0;
+}
+
+long proc_identity_check(int32_t pid, uint32_t flags, uint64_t ext_id)
+{
+	struct proc_uniqidentifierinfo info;
+	long err;
+
+	if ((err = proc_identity_fetch(pid, &info)) < 0)
+		return err;
+	if ((flags & PIF_COMPARE_IDVERSION) && ext_id != (uint32_t) info.p_idversion)
+		return -ESRCH;
+	if ((flags & PIF_COMPARE_UNIQUEID) && ext_id != info.p_uniqueid)
+		return -ESRCH;
+	return 0;
+}
+
+// XNU's proc_info_extended_id() (bsd/kern/proc_info.c): proc_info() for a process that must still be the one the caller
+// means, by pid version or unique id. libproc's proc_pidpath_audittoken() calls it with an audit token's pid version.
+long sys_proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor, uint32_t flags, uint64_t ext_id,
+		uint64_t arg, void* buffer, int32_t bufsize)
+{
+	if ((flags & (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID)) == (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID))
+		return -EINVAL;
+
+	return proc_info_internal(callnum, pid, flags, ext_id, flavor, arg, buffer, bufsize);
 }
 
 // XNU's proc_terminate(), which launchd uses to stop a job: signals another process and returns the signal. XNU sends
@@ -132,6 +186,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, bool find_zombie, void* buff
 static long fill_shortbsdinfo(int32_t pid, bool find_zombie, struct proc_bsdshortinfo* info, struct proc_names* names);
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_tbsdinfo(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_bsdinfowithuniqid(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize);
+static long _proc_pidinfo_exitreason(int32_t pid, int32_t bufsize, int32_t size);
 static long _proc_pidinfo_platforminfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_pathinfo(int32_t pid, void* buffer, int32_t bufsize);
@@ -140,7 +196,74 @@ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize);
 static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize);
 
-long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
+// The least buffer each flavor's answer needs, which XNU's proc_pidinfo() checks before it looks up the process; -1 for
+// a flavor Darling doesn't answer. A flavor goes both here and in _proc_pidinfo_fill(), as in XNU's two switches.
+static long _proc_pidinfo_size(uint32_t flavor)
+{
+	switch (flavor)
+	{
+		case PROC_PIDREGIONPATHINFO:
+			return sizeof(struct proc_regionwithpathinfo);
+		case PROC_PIDT_SHORTBSDINFO:
+			return sizeof(struct proc_bsdshortinfo);
+		case PROC_PIDUNIQIDENTIFIERINFO:
+			return sizeof(struct proc_uniqidentifierinfo);
+		case PROC_PIDTBSDINFO:
+			return sizeof(struct proc_bsdinfo);
+		case PROC_PIDT_BSDINFOWITHUNIQID:
+			return sizeof(struct proc_bsdinfowithuniqid);
+		case PROC_PIDEXITREASONINFO:
+			return sizeof(struct proc_exitreasoninfo);
+		case PROC_PIDEXITREASONBASICINFO:
+			return sizeof(struct proc_exitreasonbasicinfo);
+		case PROC_PIDTHREADINFO:
+			return sizeof(struct proc_threadinfo);
+		case PROC_PIDREGIONPATH:
+			return sizeof(struct proc_regionpath);
+		case PROC_PIDTASKINFO:
+			return sizeof(struct proc_taskinfo);
+		case PROC_PIDTASKALLINFO:
+			return sizeof(struct proc_taskallinfo);
+		case PROC_PIDPLATFORMINFO:
+			return sizeof(uint32_t);
+		case PROC_PIDPATHINFO: // cut to the buffer
+		case PROC_PIDLISTTHREADS: // as many threads as fit
+			return 0;
+		default:
+			return -1;
+	}
+}
+
+// XNU's proc_pidinfo(): the flavor and the buffer first, then the process's id if the caller gave one, then the answer
+static long _proc_pidinfo(int32_t pid, uint32_t flags, uint64_t ext_id, uint32_t flavor, uint64_t arg, void* buffer,
+		int32_t bufsize)
+{
+	bool compare = (flags & (PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID)) != 0;
+	long size = _proc_pidinfo_size(flavor);
+	long ret, err;
+
+	if (size < 0)
+	{
+		__simple_printf("sys_proc_info(): Unsupported pidinfo flavor: %d\n", flavor);
+		return -ENOTSUP;
+	}
+	if (bufsize < size)
+		return -ENOSPC;
+
+	// XNU compares the id and fills the answer under one proc reference. Here the answer is a separate read (/proc or
+	// another RPC), so the id is checked again after it: an exec or a pid reuse in between is ESRCH, not the answer for
+	// another image or process. Two checks that agree mean one process held the pid throughout, because darlingserver
+	// never reuses a unique id and gives a new pid version at every exec. Unlike XNU, darlingserver may have already
+	// dropped a zombie (arg != 0); no caller gives a compare flag for one.
+	if (compare && (err = proc_identity_check(pid, flags, ext_id)) < 0)
+		return err;
+	ret = _proc_pidinfo_fill(pid, flavor, arg, buffer, bufsize);
+	if (ret >= 0 && compare && (err = proc_identity_check(pid, flags, ext_id)) < 0)
+		return err;
+	return ret;
+}
+
+static long _proc_pidinfo_fill(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
 {
 	// proc_pidinfo() (xnu-12377.121.6 bsd/kern/proc_info.c) finds a zombie for these flavors when arg is nonzero, and
 	// otherwise not: proc_find() doesn't (bsd/kern/kern_proc.c)
@@ -167,6 +290,18 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 		case PROC_PIDTBSDINFO:
 		{
 			return _proc_pidinfo_tbsdinfo(pid, find_zombie, buffer, bufsize);
+		}
+		case PROC_PIDT_BSDINFOWITHUNIQID:
+		{
+			return _proc_pidinfo_bsdinfowithuniqid(pid, find_zombie, buffer, bufsize);
+		}
+		case PROC_PIDEXITREASONINFO:
+		{
+			return _proc_pidinfo_exitreason(pid, bufsize, sizeof(struct proc_exitreasoninfo));
+		}
+		case PROC_PIDEXITREASONBASICINFO:
+		{
+			return _proc_pidinfo_exitreason(pid, bufsize, sizeof(struct proc_exitreasonbasicinfo));
 		}
 		case PROC_PIDTHREADINFO:
 		{
@@ -197,40 +332,62 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
 			return _proc_pidinfo_platforminfo(pid, buffer, bufsize);
 		}
 		default:
-		{
-			__simple_printf("sys_proc_info(): Unsupported pidinfo flavor: %d\n",
-					flavor);
-			return -ENOTSUP;
-		}
+			return -ENOTSUP; // _proc_pidinfo_size() has the flavor and this switch doesn't
 	}
 }
 
 static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
 {
 #ifndef VARIANT_DYLD
-	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
-	uint64_t unique_id, parent_unique_id;
-	uint32_t pidversion;
-	uint64_t uuid[2];
-	int code;
+	long err;
+
+	if (bufsize < sizeof(struct proc_uniqidentifierinfo))
+		return -ENOSPC;
+
+	memset(buffer, 0, bufsize);
+	if ((err = proc_identity_fetch(pid, (struct proc_uniqidentifierinfo*) buffer)) < 0)
+		return err;
+#endif
+	return sizeof(struct proc_uniqidentifierinfo);
+}
+
+// launchd_sim asks for this at every spawn, for the job's unique id and pid version
+static long _proc_pidinfo_bsdinfowithuniqid(int32_t pid, bool find_zombie, void* buffer, int32_t bufsize)
+{
+	struct proc_bsdinfowithuniqid* info = (struct proc_bsdinfowithuniqid*) buffer;
 
 	if (bufsize < sizeof(*info))
 		return -ENOSPC;
 
-	memset(buffer, 0, bufsize);
+	long err = _proc_pidinfo_tbsdinfo(pid, find_zombie, &info->pbsd, sizeof(info->pbsd));
+	if (err < 0)
+		return err;
 
-	// darlingserver owns process identity, so these agree with the process's audit token and bank vouchers; the UUID is
-	// the executable's LC_UUID, recorded at exec (logd files the process's format strings under it)
-	code = dserver_rpc_proc_identity(pid, &unique_id, &parent_unique_id, &pidversion, &uuid[0], &uuid[1]);
-	if (code < 0)
-		return errno_linux_to_bsd(code);
+	// proc_pidinfo() ignores proc_piduniqidentifierinfo()'s result, which can't fail there: the ids stay zero if
+	// darlingserver doesn't know the process
+	if (_proc_pidonfo_uniqinfo(pid, &info->p_uniqidentifier, sizeof(info->p_uniqidentifier)) < 0)
+		memset(&info->p_uniqidentifier, 0, sizeof(info->p_uniqidentifier));
 
-	memcpy(info->p_uuid, uuid, sizeof(info->p_uuid));
-	info->p_uniqueid = unique_id;
-	info->p_puniqueid = parent_unique_id;
-	info->p_idversion = pidversion;
-#endif
-	return sizeof(struct proc_uniqidentifierinfo);
+	return sizeof(struct proc_bsdinfowithuniqid);
+}
+
+// XNU's proc_pidexitreasoninfo() (bsd/kern/proc_info.c), which launchd_sim asks at every job's exit: the process, a
+// zombie too, may be asked about only by its parent (else EACCES), and one without an exit reason is ENOENT. Darling
+// records no exit reasons, so the parent always gets ENOENT. A pid already reaped is ESRCH, as XNU's lookup answers.
+// While the process is traced, XNU's parent is the tracer and lets the original parent ask too. Linux's stat keeps the
+// original parent, so that one gets ENOENT, and a tracer that isn't the parent gets EACCES.
+static long _proc_pidinfo_exitreason(int32_t pid, int32_t bufsize, int32_t size)
+{
+	long ppid;
+
+	if (bufsize < size)
+		return -ENOSPC;
+
+	if ((ppid = proc_stat_ppid(pid)) < 0)
+		return ppid;
+	if (ppid != sys_getpid())
+		return -EACCES;
+	return -ENOENT;
 }
 
 // glibc bits/confname.h
