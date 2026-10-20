@@ -27,7 +27,9 @@
 //
 // Not kept: joinable work intervals, which XNU hands out as a port, a kernel object of its own (libdispatch's
 // workgroups ask for those). A joinable create is ENOTSUP; no port is a work interval's, so every operation on one is
-// XNU's answer for a port that isn't (EINVAL).
+// XNU's answer for a port that isn't (EINVAL). Joinable intervals would make darlingserver the owner of the interval
+// (a kobject, with its port, its creator and its id): the TSD would only cache the thread's membership, so that NOTIFY
+// stays free of RPCs, and last_id would go, since a process-local id could then equal a server-issued one.
 
 static bool ca_client_created;
 static uint64_t last_id; // XNU's unique_work_interval_id; 0 is no interval
@@ -52,6 +54,7 @@ void work_interval_atfork_child(void)
 static long create(struct work_interval_create_params* params)
 {
 	uint32_t flags = params->wicp_create_flags;
+	bool marked = false;
 
 	// a non-joinable create also joins the thread to it, so it may not be in one yet
 	if (!(flags & WORK_INTERVAL_FLAG_JOINABLE) && thread_interval() != 0)
@@ -68,9 +71,11 @@ static long create(struct work_interval_create_params* params)
 		// Once marked, a process stays marked: nothing in XNU clears TF_CA_CLIENT_WI, not even DESTROY.
 		if (__atomic_exchange_n(&ca_client_created, true, __ATOMIC_RELAXED))
 			return -EALREADY;
+		marked = true;
 	}
 
-	// CONFIG_SCHED_AUTO_JOIN's checks: KERN_NOT_SUPPORTED, which work_interval_ctl() answers as EINVAL
+	// CONFIG_SCHED_AUTO_JOIN's checks: KERN_NOT_SUPPORTED, which work_interval_ctl() answers as EINVAL. They are arm64
+	// macOS's kernel's, which runs the x86_64 simulator under Rosetta; an Intel Mac's kernel has neither check.
 	if (flags & WORK_INTERVAL_FLAG_ENABLE_AUTO_JOIN)
 	{
 		if ((flags & WORK_INTERVAL_TYPE_MASK) != WORK_INTERVAL_TYPE_COREAUDIO || !(flags & WORK_INTERVAL_FLAG_GROUP))
@@ -79,13 +84,17 @@ static long create(struct work_interval_create_params* params)
 	if ((flags & WORK_INTERVAL_FLAG_ENABLE_DEFERRED_FINISH) && !(flags & WORK_INTERVAL_FLAG_ENABLE_AUTO_JOIN))
 		return -EINVAL;
 
-	// where XNU makes the interval's port
+	// where XNU makes the interval's port. XNU's create succeeds here, so a CA_CLIENT mark this call set is undone: a
+	// later CA_CLIENT create (UIKit's, which isn't joinable) would otherwise be EALREADY with no interval ever made.
 	if (flags & WORK_INTERVAL_FLAG_JOINABLE)
 	{
 		static bool told;
 
+		if (marked)
+			__atomic_store_n(&ca_client_created, false, __ATOMIC_RELAXED);
 		if (!__atomic_exchange_n(&told, true, __ATOMIC_RELAXED))
-			__simple_printf("work_interval_ctl: joinable work intervals (flags 0x%x) are not supported: ENOTSUP\n", flags);
+			__simple_fprintf(2, "work_interval_ctl: joinable work intervals (flags 0x%x) are not supported: ENOTSUP\n",
+				flags);
 		return -ENOTSUP;
 	}
 
@@ -134,8 +143,9 @@ long sys_work_interval_ctl(uint32_t operation, uint64_t work_interval_id, void* 
 		case WORK_INTERVAL_OPERATION_JOIN:
 			if (arg != NULL)
 				return -EINVAL;
-			// MACH_PORT_NULL leaves the thread's interval, whatever it is; any other port isn't a work interval's
-			if (work_interval_id != MACH_PORT_NULL)
+			// MACH_PORT_NULL leaves the thread's interval, whatever it is; any other port isn't a work interval's. The
+			// id is a port name, so its low 32 bits, as XNU's cast
+			if ((mach_port_name_t)work_interval_id != MACH_PORT_NULL)
 				return -EINVAL;
 			thread_interval_set(0);
 			return 0;
