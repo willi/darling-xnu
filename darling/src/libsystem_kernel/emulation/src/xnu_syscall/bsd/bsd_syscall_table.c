@@ -57,6 +57,7 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/syscall.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/sysctl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfid.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/misc/work_interval_ctl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/madvise.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/mman/msync.h>
@@ -495,6 +496,7 @@ void* __bsd_syscall_table[600] = {
 	[478] = sys_bsdthread_ctl,
 	[483] = sys_csrctl,
 	[488] = sys_renameatx_np,
+	[499] = sys_work_interval_ctl,
 	[500] = sys_getentropy,
 	[515] = sys_ulock_wait,
 	[516] = sys_ulock_wake,

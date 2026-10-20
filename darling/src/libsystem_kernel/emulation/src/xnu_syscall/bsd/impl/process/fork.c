@@ -24,6 +24,7 @@
 #include <darling/emulation/xnu_syscall/bsd/helper/network/socktables.h>
 #include <darling/emulation/xnu_syscall/mach/impl/purgeable.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/fileid_cache.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/misc/work_interval_ctl.h>
 
 #include <darling/emulation/xnu_syscall/bsd/helper/bsdthread/cancelable.h>
 
@@ -124,6 +125,8 @@ long sys_fork_special_ports_locked(void)
 		fileid_cache_atfork_child();
 		// the child's thread is a new one, whose cancellation flags start clear (XNU's uthread_alloc zeroes them)
 		__darling_cancel_flags_clear(~0ul);
+		// and is in no work interval, in a process that has created none (XNU's are the thread's and the task's)
+		work_interval_atfork_child();
 
 #ifndef VARIANT_DYLD
 		// for tests: see __darling_fork_stop_child
