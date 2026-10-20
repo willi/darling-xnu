@@ -60,6 +60,20 @@ static inline int __darling_cancel_pending(unsigned long flags)
 	return (flags & __DARLING_CANCEL_TEST) == __DARLING_CANCEL_ACT;
 }
 
+// The cancellation points, as XNU's: each is a syscall whose XNU implementation calls __pthread_testcancel(1). Only
+// bsd_syscall_table.c dispatches to one (sys_X); code in here that makes the same call calls its sys_X_nocancel (or
+// close_internal), so that no syscall XNU doesn't cancel becomes a cancellation point. Three kinds:
+// - Interrupted while blocked: CANCELATION_POINT() first, then the blocking call through LINUX_SYSCALL_CP (or
+//   LINUX_SYSCALL_MAYBE_CP with the _nocancel entry's cp 0), which a cancel interrupts (linux-syscall.S). read, readv,
+//   pread, write, writev (an SO_NOSIGPIPE socket's sendmsg too), pwrite, recvfrom, recvmsg, sendto, sendmsg, accept,
+//   connect, poll, select, pselect, sigsuspend, sigwait, wait4, open and openat (a FIFO's wait for its peer), and
+//   fcntl (F_SETLKW, F_OFD_SETLKW and their timeouts). Their CANCELATION_POINT() is the same test as
+//   linux_syscall_cp's, as an early out before the work ahead of the call (path expansion, conversions).
+// - Tested only before the call: close, msync and _open_for_libelfloader, whose Linux calls a cancel doesn't
+//   interrupt once they have started; and semwait_signal and sem_wait, whose waits are in darlingserver (step 2b).
+// - Not tested: fsync, fdatasync and waitid, which are cancellation points in XNU (vfs_syscalls.c fsync and
+//   fdatasync, kern_exit.c waitid); a cancel sent while they block is acted on at the next cancellation point.
+
 // XNU's __pthread_testcancel(1) before a cancelable syscall (kern_sig.c 969-987): EINTR, leaving the cancellation for
 // the caller's cerror to act on (libpthread's _pthread_exit_if_canceled, through __pthread_canceled(0)).
 #define CANCELATION_POINT() \
