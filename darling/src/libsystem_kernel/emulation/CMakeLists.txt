@@ -147,6 +147,7 @@ set(xnu_syscall_bsd_sources
 	src/xnu_syscall/bsd/impl/bsdthread/pthread_fchdir.c
 	src/xnu_syscall/bsd/impl/bsdthread/pthread_kill.c
 	src/xnu_syscall/bsd/impl/bsdthread/pthread_markcancel.c
+	src/xnu_syscall/bsd/impl/bsdthread/qos_sched.c
 	src/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.c
 	src/xnu_syscall/bsd/impl/bsdthread/workq_open.c
 	src/xnu_syscall/bsd/impl/conf/fpathconf.c

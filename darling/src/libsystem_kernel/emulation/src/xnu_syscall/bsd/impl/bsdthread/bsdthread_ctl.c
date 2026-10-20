@@ -10,11 +10,16 @@
 #include <mach/mach_port.h>
 #include <pthread/priority_private.h>
 
+#include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/qos_sched.h>
+
 // bsd/pthread/bsdthread_private.h
+#define BSDTHREAD_CTL_SET_SELF 0x100
 #define BSDTHREAD_CTL_QOS_MAX_PARALLELISM 0x800
 #define _PTHREAD_QOS_PARALLELISM_COUNT_LOGICAL 0x1
 #define _PTHREAD_QOS_PARALLELISM_REALTIME 0x2
 #define _PTHREAD_QOS_PARALLELISM_CLUSTER_SHARED_RSRC 0x4
+// libpthread's _pthread_set_flags_t (private/pthread/qos_private.h), XNU's workq_set_self_flags
+#define _PTHREAD_SET_SELF_QOS_FLAG 0x1
 
 // XNU's bsdthread_get_max_parallelism (bsd/pthread/pthread_workqueue.c) over sched_qos_max_parallelism
 // (osfmk/kern/sched_prim.c): the host's logical or physical CPU count, from the host_info that hw.logicalcpu and
@@ -54,10 +59,19 @@ static long max_parallelism(unsigned long qos, unsigned long flags)
 
 long sys_bsdthread_ctl(long command, void* arg1, void* arg2, void* arg3) {
 	switch (command) {
+	case BSDTHREAD_CTL_SET_SELF:
+		// arg1 is the thread's new pthread_priority_t, arg2 a voucher and arg3 the _PTHREAD_SET_SELF_* flags
+		// (XNU's bsdthread_set_self). The QoS reaches Linux as the thread's nice (qos_sched.h). It returns 0 for
+		// every input, as before: XNU's EINVAL cases (a malformed priority; a manager, above-UI or overcommit to
+		// cooperative workqueue thread) need workqueue state Darling doesn't keep, and libdispatch crashes on
+		// EINVAL here (_dispatch_set_priority_and_voucher_slow), so a wrong EINVAL costs more than a missing one.
+		if ((unsigned long) arg3 & _PTHREAD_SET_SELF_QOS_FLAG)
+			qos_sched_apply_self(_pthread_priority_thread_qos((pthread_priority_t) arg1));
+		return 0;
 	case BSDTHREAD_CTL_QOS_MAX_PARALLELISM:
 		return max_parallelism((unsigned long) arg1, (unsigned long) arg2);
 	default:
-		// QoS, overrides and the rest change nothing yet: every thread runs at its process's Linux priority
+		// overrides and the rest change nothing yet
 		return 0;
 	}
 };

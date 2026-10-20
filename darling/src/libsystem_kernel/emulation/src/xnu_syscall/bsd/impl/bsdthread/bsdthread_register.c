@@ -16,6 +16,8 @@
 
 #include <darlingserver/rpc.h>
 #include <darling/emulation/common/libsystem.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/qos_sched.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.h>
 
 int pthread_obj_size;
 bsdthread_entry_t pthread_entry_point;
@@ -105,6 +107,9 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
 		__simple_abort();
 	}
 
+	// main's nice is the process's, which every QoS's nice is relative to
+	qos_sched_init_base();
+
 	return workq_supported_features();
 }
 
@@ -183,7 +188,12 @@ void wqueue_entry_point_wrapper(void* self, int thread_port, void* stackaddr,
 // source in `libpthread/src/pthread_asm.S`.
 void wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
 		void* item, int reuse, int nevents) {
-	
+	// Every workqueue thread enters libdispatch through here: a new one, a parked one reused for a request, and a
+	// workloop's servicer. Each time, it takes the QoS its flags give it, as XNU's thread does (only a thread that
+	// enters just to terminate doesn't need one).
+	if (nevents != WORKQ_EXIT_THREAD_NKEVENT)
+		qos_sched_apply_wq_flags(reuse);
+
 	// No additional function calls should occur beyond this point. Otherwise, we will risk our
 	// registers being call-clobbered. I recommend reading the following doc for more details:
 	// https://gcc.gnu.org/onlinedocs/gcc/Local-Register-Variables.html
