@@ -146,7 +146,13 @@ static void cancel_handler(int signum, struct linux_siginfo* info, struct linux_
 	__darling_cancel_flags_set(DARLING_UT_CANCEL);
 }
 
-// SA_RESTART, so that the syscalls the signal interrupts outside a cancellation point carry on as if it hadn't come
+// SA_RESTART, so that most syscalls the signal interrupts outside a cancellation point carry on. Not all: Linux never
+// restarts some waits after a handler (ERESTARTNOHAND, ERESTART_RESTARTBLOCK and timed sockets: poll, select, pselect6,
+// epoll_wait and so kevent, nanosleep, a timed futex and so a timed __ulock_wait, rt_sigtimedwait, and recv or send
+// with SO_RCVTIMEO or SO_SNDTIMEO). Such a wait returns EINTR once, also in a cancellation point while cancellation is
+// disabled. That is a divergence: XNU's __pthread_markcancel never aborts a thread in a BSD syscall that isn't a
+// cancellation point (unix_syscall sets UT_NOTCANCELPT, this tree's xnu-7195.141.2 bsd/dev/i386/systemcalls.c 186), nor
+// one whose cancellation is disabled. Their callers (libdispatch, os_unfair_lock) retry on EINTR.
 static void handle_cancel_signal(void)
 {
 	struct linux_sigaction sa;
