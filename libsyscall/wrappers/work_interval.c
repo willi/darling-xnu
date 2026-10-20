@@ -274,50 +274,42 @@ work_interval_copy_port(work_interval_t interval_handle, mach_port_t *port)
 }
 
 #ifdef DARLING
-#include <stdio.h>
+// Not in XNU's public sources. Instances carry a frame's start, deadline and finish to the performance controller, which
+// Darling doesn't have: _alloc answers NULL and the rest do nothing. They are quiet because UIKit calls them for every
+// interval it measures, which with work_interval_ctl in place happens in every scroll.
 
 work_interval_instance_t work_interval_instance_alloc(work_interval_t wi) {
-    puts("STUB: work_interval_instance_alloc called");
     return (work_interval_instance_t)0;
 }
 
 void work_interval_instance_clear(work_interval_instance_t wii) {
-    puts("STUB: work_interval_instance_clear called");
 }
 
 int work_interval_instance_finish(work_interval_instance_t wii) {
-    puts("STUB: work_interval_instance_finish called");
     return 0;
 }
 
 void work_interval_instance_free(work_interval_instance_t wii) {
-    puts("STUB: work_interval_instance_free called");
 }
 
-// not in XNU's public sources; called by newer UIKit and libdispatch (work_interval_instance_alloc returns NULL here)
+// called by newer UIKit and libdispatch
 void work_interval_instance_set_complexity(work_interval_instance_t wii, uint8_t complexity) {
-    puts("STUB: work_interval_instance_set_complexity called");
 }
 
 void work_interval_instance_set_deadline(work_interval_instance_t wii, uint64_t deadline) {
-    puts("STUB: work_interval_instance_set_deadline called");
 }
 
 void work_interval_instance_set_finish(work_interval_instance_t wii, uint64_t current_finish) {
-    puts("STUB: work_interval_instance_set_finish called");
 }
 
 void work_interval_instance_set_start(work_interval_instance_t wii, uint64_t start) {
-    puts("STUB: work_interval_instance_set_start called");
 }
 
 int work_interval_instance_start(work_interval_instance_t wii) {
-    puts("STUB: work_interval_instance_start called");
     return 0;
 }
 
 int work_interval_instance_update(work_interval_instance_t wii) {
-    puts("STUB: work_interval_instance_update called");
     return 0;
 }
 #endif
