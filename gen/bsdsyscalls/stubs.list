@@ -291,7 +291,7 @@
 /home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getpgid.S
 /home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getpgrp.S
 /home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getppid.S
-/home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getpriority.S
+/home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/___getpriority.S
 /home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getrusage.S
 /home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getsid.S
 /home/thomasa/Documents/CodingProjects/Repository/GitHub/darling/src/external/xnu/gen/bsdsyscalls/_getsockopt.S
