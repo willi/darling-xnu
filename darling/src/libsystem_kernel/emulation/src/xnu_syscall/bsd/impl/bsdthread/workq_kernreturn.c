@@ -28,6 +28,7 @@
 
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_workq.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_id.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/wl_instr.h>
 
 #include <elfcalls/threads.h>
 #include <darlingserver/rpc.h>
@@ -495,8 +496,17 @@ long sys_workq_kernreturn(int options, void* item, int affinity, int prio)
 
 			for (i = 0; i < affinity; i++)
 			{
-				// Increase the amount of running threads
-				sem_down(&workq_sem, -1);
+				// Increase the amount of running threads. C3: this blocks at WQ_MAX_THREADS, where XNU queues the request.
+				if (wli_enabled() && __atomic_load_n(&workq_sem, __ATOMIC_RELAXED) <= 0)
+				{
+					uint64_t t0 = wli_mono_us();
+					wli_log("reqthreads-cap-wait-start sem=%p", &workq_sem);
+					sem_down(&workq_sem, -1);
+					wli_log("reqthreads-cap-wait-done sem=%p el_ms=%llu", &workq_sem,
+						(unsigned long long) ((wli_mono_us() - t0) / 1000));
+				}
+				else
+					sem_down(&workq_sem, -1);
 
 				libsimple_lock_lock(&workq_parked_lock);
 

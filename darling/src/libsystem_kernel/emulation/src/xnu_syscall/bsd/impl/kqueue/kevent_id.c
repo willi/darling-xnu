@@ -22,6 +22,10 @@
 #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kevent_deferdelete.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/kqueue/kqueue.h>
+#include <darling/emulation/xnu_syscall/bsd/impl/kqueue/wl_instr.h>
+#include <darling/emulation/conversion/common_at.h>
+#include <darling/emulation/conversion/fcntl/open.h>
+#include <stdarg.h>
 #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
 
 #ifndef VARIANT_DYLD
@@ -102,6 +106,17 @@ struct workloop
 	bool kq_fired; // `kq` became readable and wasn't polled since
 	struct kevent_deferdelete dd; // tracks `kq`'s knotes
 
+	// the last owner changes, for wli logging
+	struct wl_hist
+	{
+		uint64_t t_us;
+		uint32_t old_owner, new_owner, by;
+		uint32_t fflags;
+		uint16_t flags;
+		int16_t op;
+	} hist[8];
+	uint32_t hist_n;
+
 	// libpthread finds the workloop's id right before the events it hands to libdispatch
 	uint64_t servicer_id;
 	struct kevent_qos_s servicer_events[WQ_KEVENT_LIST_LEN];
@@ -128,6 +143,65 @@ static uint32_t wl_self(void)
 {
 	return wl_port_mask((uintptr_t)_pthread_getspecific_direct(_PTHREAD_TSD_SLOT_MACH_THREAD_SELF));
 }
+
+// ---- wli: see wl_instr.h
+
+static int wli_state = -1; // -1 unknown, 0 off, 1 on
+
+static uint64_t wli_clock_us(int clock)
+{
+	struct { long sec, nsec; } ts = { 0, 0 };
+	LINUX_SYSCALL(__NR_clock_gettime, clock, &ts);
+	return (uint64_t) ts.sec * 1000000ull + (uint64_t) ts.nsec / 1000;
+}
+
+uint64_t wli_mono_us(void)
+{
+	return wli_clock_us(1 /* CLOCK_MONOTONIC */);
+}
+
+bool wli_enabled(void)
+{
+	int state = __atomic_load_n(&wli_state, __ATOMIC_RELAXED);
+	if (state < 0)
+	{
+		int fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, WLI_DIR, LINUX_O_RDONLY | LINUX_O_DIRECTORY | LINUX_O_CLOEXEC, 0);
+		state = fd >= 0;
+		if (fd >= 0)
+			LINUX_SYSCALL1(__NR_close, fd);
+		__atomic_store_n(&wli_state, state, __ATOMIC_RELAXED);
+	}
+	return state;
+}
+
+// one record: realtime us, Linux pid and tid, the thread's port name, then the text
+void wli_log(const char* format, ...)
+{
+	char path[64], buf[1024];
+	va_list vl;
+	int n, fd;
+
+	if (!wli_enabled())
+		return;
+	n = __simple_snprintf(buf, sizeof(buf), "t=%llu pid=%d tid=%d port=%x ", (unsigned long long) wli_clock_us(0),
+		(int) LINUX_SYSCALL0(__NR_getpid), (int) LINUX_SYSCALL0(__NR_gettid), wl_self());
+	va_start(vl, format);
+	n += __simple_vsnprintf(buf + n, sizeof(buf) - n - 1, format, vl);
+	va_end(vl);
+	if (n > (int) sizeof(buf) - 2)
+		n = sizeof(buf) - 2;
+	buf[n++] = '\n';
+
+	__simple_snprintf(path, sizeof(path), WLI_DIR "/%d.log", (int) LINUX_SYSCALL0(__NR_getpid));
+	fd = LINUX_SYSCALL(__NR_openat, LINUX_AT_FDCWD, path, LINUX_O_WRONLY | LINUX_O_CREAT | LINUX_O_APPEND | LINUX_O_CLOEXEC, 0644);
+	if (fd < 0)
+		return;
+	LINUX_SYSCALL3(__NR_write, fd, buf, n);
+	LINUX_SYSCALL1(__NR_close, fd);
+}
+
+struct workloop;
+static void wli_state_log(struct workloop* wl, const char* what, uint64_t ident, uint64_t elapsed_us);
 
 static struct workloop** wl_bucket(uint64_t id)
 {
@@ -336,6 +410,24 @@ static bool wl_request_thread(struct workloop* wl)
 	return true;
 }
 
+// Logs `wl`'s state and its last owner changes; under wl->lock.
+static void wli_state_log(struct workloop* wl, const char* what, uint64_t ident, uint64_t elapsed_us)
+{
+	uint32_t i, n = wl->hist_n < 8 ? wl->hist_n : 8;
+
+	wli_log("%s wl=%llx ident=%llx el_ms=%llu owner=%x servicer=%x serviced=%d treq=%d active=%d kq=%d armed=%d "
+		"fired=%d pending=%d hist=%u", what, (unsigned long long) wl->id, (unsigned long long) ident,
+		(unsigned long long) (elapsed_us / 1000), wl->owner, wl->servicer, wl->serviced, wl->thread_request != NULL,
+		wl->thread_request_active, wl->kq, wl->kq_armed, wl->kq_fired, wl->kq >= 0 && kevent_dd_pending(&wl->dd),
+		wl->hist_n);
+	for (i = 0; i < n; i++)
+	{
+		const struct wl_hist* h = &wl->hist[(wl->hist_n - n + i) % 8];
+		wli_log("  owner-change wl=%llx t=%llu old=%x new=%x by=%x fflags=%x flags=%x op=%d", (unsigned long long) wl->id,
+			(unsigned long long) h->t_us, h->old_owner, h->new_owner, h->by, h->fflags, h->flags, h->op);
+	}
+}
+
 // On the thread answering a servicer request for `context`, before it enters libdispatch.
 static bool wl_servicer_prepare(void* context, struct workq_batch* batch)
 {
@@ -350,6 +442,9 @@ static bool wl_servicer_prepare(void* context, struct workq_batch* batch)
 
 	if (n == 0)
 	{
+		// C1: XNU clears an owner that is the binding thread (kqueue_threadreq_bind()); this drops the request
+		if (wl->owner && wli_enabled())
+			wli_state_log(wl, wl->owner == wl_self() ? "prepare-refused-owner-is-self" : "prepare-refused-owned", 0, 0);
 		wl->serviced = false;
 		wl_arm_kq(wl);
 		libsimple_lock_unlock(&wl->lock);
@@ -444,10 +539,34 @@ static void wl_sync_wait(struct workloop* wl, struct wl_knote* kn)
 	if (start_servicer)
 		workq_thread_request(wl_servicer_prepare, wl);
 
+	uint64_t t0 = 0, next_us = 1000000;
+	bool wli = wli_enabled();
+
+	if (wli)
+		t0 = wli_mono_us();
 	while (!__atomic_load_n(&kn->woken, __ATOMIC_ACQUIRE))
-		__linux_futex(&kn->woken, FUTEX_WAIT, 0, NULL, NULL, 0);
+	{
+		if (!wli)
+		{
+			__linux_futex(&kn->woken, FUTEX_WAIT, 0, NULL, NULL, 0);
+			continue;
+		}
+		// with wli, wake every second to log the state of a wait that goes on (at 1, 4, 16, 64 s)
+		struct timespec ts = { 1, 0 };
+		__linux_futex(&kn->woken, FUTEX_WAIT, 0, &ts, NULL, 0);
+		if (!__atomic_load_n(&kn->woken, __ATOMIC_ACQUIRE) && wli_mono_us() - t0 >= next_us)
+		{
+			libsimple_lock_lock(&wl->lock);
+			wli_state_log(wl, start_servicer ? "sync-wait-ongoing servicer-requested" : "sync-wait-ongoing", kn->ident,
+				wli_mono_us() - t0);
+			libsimple_lock_unlock(&wl->lock);
+			next_us *= 4;
+		}
+	}
 
 	libsimple_lock_lock(&wl->lock);
+	if (wli && wli_mono_us() - t0 >= 500000)
+		wli_state_log(wl, "sync-wait-done", kn->ident, wli_mono_us() - t0);
 	kn->waiting = false;
 	if (kn->dropped)
 		free(kn);
@@ -509,6 +628,19 @@ static int wl_update(struct workloop* wl, struct wl_knote* kn, struct kevent_qos
 	// the servicer is never tracked as the owner
 	if (wl->servicer != 0 && new_owner == wl->servicer)
 		new_owner = 0;
+	if (new_owner != wl->owner && wli_enabled())
+	{
+		struct wl_hist* h = &wl->hist[wl->hist_n++ % 8];
+		*h = (struct wl_hist) {
+			.t_us = wli_mono_us(),
+			.old_owner = wl->owner,
+			.new_owner = new_owner,
+			.by = wl_self(),
+			.fflags = kev->fflags,
+			.flags = kev->flags,
+			.op = op,
+		};
+	}
 	wl->owner = new_owner;
 
 	if (needs_wake)
