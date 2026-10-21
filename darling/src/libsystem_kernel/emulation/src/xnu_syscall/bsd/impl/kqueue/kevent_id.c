@@ -170,6 +170,9 @@ bool wli_enabled(void)
 		if (fd >= 0)
 			LINUX_SYSCALL1(__NR_close, fd);
 		__atomic_store_n(&wli_state, state, __ATOMIC_RELAXED);
+		// a marker per process, so a run can tell this library is the one loaded
+		if (state)
+			wli_log("wli-on kevent_id=%p", (void*) &wli_state);
 	}
 	return state;
 }
