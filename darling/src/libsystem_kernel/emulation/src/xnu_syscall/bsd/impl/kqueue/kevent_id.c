@@ -439,6 +439,16 @@ static bool wl_servicer_prepare(void* context, struct workq_batch* batch)
 
 	libsimple_lock_lock(&wl->lock);
 
+	// As XNU's kqueue_threadreq_bind(): the servicer is never the owner. If this thread is recorded as the owner (a
+	// stale record: it owned the queue once and is now a pool thread picking up the workloop), forget it rather than
+	// take the workloop for owned, which would drop the request and refuse every servicer until that record goes.
+	if (wl->owner && wl->owner == wl_self())
+	{
+		if (wli_enabled())
+			wli_state_log(wl, "prepare-cleared-owner-is-self", 0, 0);
+		wl->owner = 0;
+	}
+
 	// another thread may have taken ownership since the request
 	if (!wl->owner)
 		n = wl_collect_events(wl, wl->servicer_events, WQ_KEVENT_LIST_LEN);
