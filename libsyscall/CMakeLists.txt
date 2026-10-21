@@ -428,7 +428,7 @@ set(syscall_sources
 	bsdsyscalls/_getpgrp.S
 	bsdsyscalls/___getpid.S
 	bsdsyscalls/_getppid.S
-	bsdsyscalls/_getpriority.S
+	bsdsyscalls/___getpriority.S
 	bsdsyscalls/___getrlimit.S
 	bsdsyscalls/_getrusage.S
 	bsdsyscalls/___getsgroups.S
